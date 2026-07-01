@@ -2,9 +2,11 @@
 
 MiniSkynet Core — личный Telegram-агент с памятью, задачами, OpenRouter и безопасным контрактом исполнения.
 
-Цель v0.1: живой Core, который отвечает в Telegram, ведёт память, хранит задачи, контролирует расход токенов и умеет запускать ручной/автоцикл, пока Codespaces открыт.
+## Сейчас есть две версии
 
-## Быстрый старт в Codespaces
+### 1. Python Core
+
+Подходит для Codespaces/ПК/VPS, но требует постоянно запущенный процесс.
 
 ```bash
 python -m venv .venv
@@ -14,15 +16,25 @@ cp .env.example .env
 python main.py
 ```
 
-Потом заполни `.env` своими ключами:
+### 2. Cloudflare Worker Core
 
-```env
-TELEGRAM_BOT_TOKEN=...
-TELEGRAM_ALLOWED_USER_ID=...
-OPENROUTER_API_KEY=...
+Подходит для телефона и бесплатного serverless-пути. Не требует постоянно включённого процесса.
+
+Файлы лежат в папке:
+
+```text
+cloudflare/
 ```
 
-Настоящие ключи нельзя коммитить в GitHub.
+Схема:
+
+```text
+Telegram webhook -> Cloudflare Worker -> OpenRouter
+Cloudflare Cron -> alive loop
+Cloudflare KV -> brain / memory / tasks
+```
+
+Инструкция: `cloudflare/README.md`.
 
 ## Команды Telegram
 
@@ -33,21 +45,12 @@ OPENROUTER_API_KEY=...
 - `/memory` — последние записи памяти.
 - `/tasks` — очередь задач.
 - `/addtask текст` — добавить задачу.
-- `/alive_on` — включить автоцикл, пока процесс запущен.
+- `/alive_on` — включить автоцикл.
 - `/alive_off` — выключить автоцикл.
 - `/cost` — расход токенов и примерная стоимость.
 
-## Архитектура v0.1
-
-```text
-Telegram Bot
-→ Task Engine
-→ OpenRouter Client
-→ Memory Engine
-→ Brain Store / JSON files
-→ Cost Guard
-```
-
 ## Безопасность
+
+Настоящие ключи нельзя коммитить в GitHub. Храни их только в `.env`, Render/Replit/Cloudflare secrets или environment variables.
 
 MiniSkynet не применяет self-update без подтверждения владельца. В v0.1 self-update пока только архитектурно подготовлен.
