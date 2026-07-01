@@ -1,6 +1,6 @@
 import codeMapWorker from "./worker-codemap.js";
 
-const VERSION = "inspector-v5-command-allowlist";
+const VERSION = "inspector-v6-control";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -66,22 +66,10 @@ function allowedCommand(command) {
   if (c.includes("cloudflare/") || c.includes(".js")) return false;
   if (c.startsWith("/agent ")) return true;
   const exact = new Set([
-    "/start",
-    "/status",
-    "/level",
-    "/memory",
-    "/tasks",
-    "/cost",
-    "/inspect_self",
-    "/next_module",
-    "/code_map",
-    "/agents",
-    "/self_audit",
-    "/grow_one",
-    "/memory_hygiene",
-    "/tasks_hygiene",
-    "/alive_on",
-    "/alive_off"
+    "/start", "/status", "/level", "/memory", "/tasks", "/cost",
+    "/inspect_self", "/next_module", "/code_map", "/agents",
+    "/self_audit", "/grow_one", "/memory_hygiene", "/tasks_hygiene",
+    "/alive_on", "/alive_off", "/last_auto_audit", "/growth_queue"
   ]);
   if (exact.has(c)) return true;
   if (c.startsWith("/file_role ")) return true;
@@ -96,10 +84,12 @@ async function snapshot(env) {
   const codeMap = await kvGet(env, "code_map", { files: {} });
   const agents = await kvGet(env, "agent_registry", { agents: [] });
   const growth = await kvGet(env, "growth_state", {});
+  const lastAudit = await kvGet(env, "last_audit_structured", null);
   const tasks = Array.isArray(tasksData.tasks) ? tasksData.tasks : [];
   const memories = Array.isArray(memData.memories) ? memData.memories : [];
   const archivedMemories = Array.isArray(archiveData.memories) ? archiveData.memories : [];
   const activeTasks = tasks.filter(t => t.status !== "archived" && t.status !== "done");
+  const growthTasks = activeTasks.filter(t => t.source === "manual_audit" || t.source === "alive_tick" || t.source === "inspector_auto_scan");
   const files = Object.keys(codeMap.files || {});
   return {
     active_layer: "cloudflare/src/worker-inspector.js",
@@ -110,36 +100,39 @@ async function snapshot(env) {
     memory_cleanup_seen: archivedMemories.length > 0,
     tasks_total: tasks.length,
     active_tasks: activeTasks.length,
+    growth_tasks: growthTasks.length,
+    latest_growth_task: growthTasks.slice(-1)[0] || null,
     agents_total: Array.isArray(agents.agents) ? agents.agents.length : 0,
     files_total: files.length,
     code_files: files,
-    growth_stage: growth.stage || "unknown"
+    growth_stage: growth.stage || "unknown",
+    last_audit_useful: lastAudit?.useful === true
   };
 }
 
 function weaknesses(s) {
   const weak = [];
   if (!s.alive) weak.push("alive выключен");
-  if (s.memories_total > 20 && !s.memory_cleanup_seen) weak.push("память требует первой чистки");
-  if (s.memories_total > 20 && s.memory_cleanup_seen) weak.push("next_module не должен повторять уже выполненную чистку памяти");
-  if (s.active_tasks > 20) weak.push("активных задач много");
-  if (s.files_total < 5) weak.push("code_map ещё не сохранён в KV");
+  if (s.files_total < 7) weak.push("code_map неполный или устарел");
   if (s.agents_total < 6) weak.push("agent registry неполный");
-  weak.push("ручной контроль инженерных изменений пока внешний");
+  if (s.memories_total > 35) weak.push("память шумная, нужна гигиена");
+  if (s.active_tasks > 80) weak.push("очередь задач раздута");
+  if (!s.last_audit_useful) weak.push("последний audit ещё не закреплён как полезная задача");
+  weak.push("код пока не применяется автоматически");
   return weak;
 }
 
 function inspectText(s) {
   const body = s.code_files.length ? s.code_files : safeFiles();
   return [
-    "Self Inspection v5:",
+    "Self Inspection v6:",
     `Активный слой: ${s.active_layer}`,
     "Текущее тело:",
     ...body.map(x => "- " + x),
-    "Что умею: level, alive, memory hygiene, agent runner, code map, file role, self inspection, dynamic next module.",
-    `Состояние: alive=${s.alive}, cycles=${s.cycles_total}, memories=${s.memories_total}, archived_memories=${s.memory_archive_total}, tasks=${s.tasks_total}, active_tasks=${s.active_tasks}, agents=${s.agents_total}`,
+    "Что умею: level, last_auto_audit, growth_queue, code map, agent runner, self inspection, dynamic next module.",
+    `Состояние: alive=${s.alive}, cycles=${s.cycles_total}, memories=${s.memories_total}, archived_memories=${s.memory_archive_total}, tasks=${s.tasks_total}, active_tasks=${s.active_tasks}, growth_tasks=${s.growth_tasks}, agents=${s.agents_total}`,
     `Главная слабость: ${weaknesses(s).join("; ")}`,
-    "Следующий безопасный шаг выбирается через /next_module. Ответ модели фильтруется: команда должна быть реальной существующей Telegram-командой."
+    "Control: inspector перехватывает /level, /last_auto_audit и /growth_queue выше старого selfcheck."
   ].join("\n");
 }
 
@@ -149,50 +142,62 @@ async function inspect(env, chatId) {
   await send(env, chatId, inspectText(s));
 }
 
-function fallbackNextModule(s) {
-  if (s.files_total < 5) {
-    return {
-      title: "Refresh Code Map",
-      command: "/code_map",
-      reason: "code_map ещё не сохранён в KV, self-inspection не видит всё тело.",
-      risk: "следующие решения будут строиться на неполной карте",
-      check: "/code_map затем /inspect_self"
-    };
+function renderLevel(s) {
+  const score = s.growth_stage === "audit_to_task_bridge" || s.growth_tasks > 0 ? 3.0 : 2.6;
+  return [
+    `Уровень: ${score}/10`,
+    `Стадия: ${score >= 3 ? "Level 3 — Audit → Memory → Task Queue" : "Level 2 — Auto Audit + Code Map"}`,
+    "Думает: по запросу, /self_audit или alive tick; inspector теперь перехватывает /level выше старого selfcheck.",
+    "Обучается: памятью, задачами, картой кода и инженерными спецификациями.",
+    `Alive: ${s.alive}`,
+    `Циклы: всего ${s.cycles_total}`,
+    `Память: ${s.memories_total}, архив памяти ${s.memory_archive_total}`,
+    `Задачи: всего ${s.tasks_total}, активных ${s.active_tasks}, growth_tasks ${s.growth_tasks}`,
+    `Growth stage: ${s.growth_stage}`,
+    `Сломано/слабо: ${weaknesses(s).join("; ")}`,
+    "Следующий шаг: /self_audit → /growth_queue → /agent tester проверить последнюю задачу."
+  ].join("\n");
+}
+
+async function showLastAutoAudit(env, chatId) {
+  const last = await kvGet(env, "last_audit_structured", null);
+  if (!last?.audit) {
+    await send(env, chatId, "Last Audit пока пуст или старый selfcheck ещё не записал структуру. Запусти /self_audit и потом /growth_queue.");
+    return;
   }
-  if (s.memories_total > 20 && !s.memory_cleanup_seen) {
-    return {
-      title: "Memory Hygiene",
-      command: "/memory_hygiene",
-      reason: "память выше безопасного порога, а архив ещё пустой: сначала нужна чистка.",
-      risk: "можно архивировать полезный урок, если фильтр слишком грубый",
-      check: "/memory_hygiene затем /level"
-    };
+  const a = last.audit;
+  await send(env, chatId, [
+    "Last Audit:",
+    `Источник: ${last.source || "unknown"}`,
+    `Файл: ${a.file || "?"}`,
+    `Слабость: ${a.weakness || "?"}`,
+    `Цель: ${a.target || "?"}`,
+    `Новая логика: ${a.new_logic || "?"}`,
+    `Риск: ${a.risk || "?"}`,
+    `Проверка: ${a.check || "?"}`,
+    `Useful: ${last.useful ? "yes" : "no"}`
+  ].join("\n"));
+}
+
+async function showGrowthQueue(env, chatId) {
+  const taskData = await kvGet(env, "tasks", { tasks: [] });
+  const tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
+  const active = tasks.filter(t => t.status !== "archived" && t.status !== "done").slice(-8).reverse();
+  if (!active.length) {
+    await send(env, chatId, "Growth Queue пустая. Запусти /self_audit или дождись alive tick.");
+    return;
   }
-  if (s.memories_total > 20 && s.memory_cleanup_seen) {
-    return {
-      title: "Next Module Loop Guard",
-      command: "/agent coder дай точную правку для worker-inspector.js: если memory_hygiene уже запускалась, не повторяй этот же следующий шаг",
-      reason: "чистка памяти уже выполнялась, поэтому повторять её как следующий шаг нельзя; нужен guard от цикла.",
-      risk: "слишком сложный выбор следующего шага будет трудно отлаживать",
-      check: "/inspect_self затем /next_module"
-    };
-  }
-  if (s.active_tasks > 20) {
-    return {
-      title: "Task Hygiene",
-      command: "/tasks_hygiene",
-      reason: "активных задач слишком много для стабильного роста.",
-      risk: "важная задача может уйти в архив",
-      check: "/tasks_hygiene затем /level"
-    };
-  }
-  return {
-    title: "Engineering Review Note",
-    command: "/agent coder дай change spec для самого слабого файла MiniSkynet: файл, старая логика, новая логика, риск, проверка",
-    reason: "ядро уже имеет self-inspection и code map; следующий шаг — конкретная инженерная спецификация без изменения файлов.",
-    risk: "если спецификация будет общей, она не поможет развитию",
-    check: "/agent tester проверь предложенный change spec"
-  };
+  await send(env, chatId, [
+    "Growth Queue:",
+    ...active.map((t, i) => `${i + 1}. ${t.title || t.file || "task"}\nФайл: ${t.file || "?"}\nНовая логика: ${t.new_logic || t.action || "?"}\nПроверка: ${t.check || "?"}`)
+  ].join("\n\n"));
+}
+
+function nextModulePlan(s) {
+  if (s.files_total < 7) return { title: "Refresh Code Map", command: "/code_map", reason: "code_map неполный или устарел.", risk: "следующие решения будут строиться на неполной карте", check: "/code_map затем /inspect_self" };
+  if (s.active_tasks > 80) return { title: "Task Hygiene", command: "/tasks_hygiene", reason: "активных задач слишком много.", risk: "может уйти в архив полезная задача", check: "/tasks_hygiene затем /level" };
+  if (s.latest_growth_task?.file) return { title: "Work Latest Growth Task", command: `/agent coder дай change spec для ${s.latest_growth_task.file}: ${s.latest_growth_task.title || s.latest_growth_task.new_logic || "growth task"}`, reason: "есть задача роста из аудита.", risk: "агент может дать слишком общий spec", check: "/agent tester проверить этот change spec" };
+  return { title: "Run Structured Audit", command: "/self_audit", reason: "нужен свежий audit, который попадёт в память и задачи, когда selfcheck v7 доедет.", risk: "модель может дать слабый audit", check: "/last_auto_audit затем /growth_queue" };
 }
 
 function renderNext(p, source) {
@@ -204,78 +209,15 @@ function renderNext(p, source) {
     `Причина: ${p.reason}`,
     `Риск: ${p.risk}`,
     `Проверка: ${p.check}`,
-    "Ограничение: это только выбор следующего шага, без применения кода."
+    "Ограничение: это выбор следующего шага, код не меняется."
   ].join("\n");
-}
-
-function parseJsonish(text) {
-  try { return JSON.parse(text); } catch (_) {}
-  const s = String(text || "");
-  const a = s.indexOf("{");
-  const b = s.lastIndexOf("}");
-  if (a >= 0 && b > a) {
-    try { return JSON.parse(s.slice(a, b + 1)); } catch (_) {}
-  }
-  return null;
-}
-
-async function askDynamicNext(env, s) {
-  await hydrate(env);
-  if (!env.OPENROUTER_API_KEY) return null;
-  const prompt = [
-    "Ты выбираешь следующий безопасный шаг роста MiniSkynet.",
-    "Опирайся только на состояние системы, code map и текущие ограничения.",
-    "Не утверждай что файлы изменены, не выдумывай внешние проекты.",
-    "Разрешённые направления: refresh code_map, memory hygiene, task hygiene, tests plan, agent registry improvement, cycle protection.",
-    "Если memories_total<=20, НЕ выбирай memory hygiene.",
-    "Если memory_cleanup_seen=true, НЕ выбирай memory hygiene повторно.",
-    "Нельзя придумывать новые команды. Разрешённые команды: /code_map, /inspect_self, /level, /tasks_hygiene, /memory_hygiene, /agents, /agent <id> <task>, /self_audit, /grow_one, /status.",
-    "Рабочие файлы:",
-    ...safeFiles().map(x => "- " + x),
-    `Состояние: ${JSON.stringify(s)}`,
-    "Верни JSON только с полями: title, command, reason, risk, check. Command должен быть одной из разрешённых команд."
-  ].join("\n");
-
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: { "content-type": "application/json", authorization: "Bearer " + env.OPENROUTER_API_KEY },
-    body: JSON.stringify({
-      model: env.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini",
-      messages: [
-        { role: "system", content: "Return valid JSON only. Russian language. Be concrete." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.05,
-      max_tokens: 450
-    })
-  });
-  const data = await res.json().catch(() => ({}));
-  if (!res.ok) return null;
-  const raw = data?.choices?.[0]?.message?.content || "";
-  const p = parseJsonish(raw);
-  if (!p || !p.title || !p.command) return null;
-
-  const joined = [p.title, p.command, p.reason, p.check].join(" ");
-  const command = String(p.command || "").trim();
-  if (!allowedCommand(command)) return null;
-  if (s.memories_total <= 20 && mentionsMemoryStep(joined)) return null;
-  if (s.memory_cleanup_seen && mentionsMemoryStep(joined)) return null;
-
-  return {
-    title: String(p.title).slice(0, 120),
-    command: command.slice(0, 240),
-    reason: String(p.reason || "").slice(0, 500),
-    risk: String(p.risk || "").slice(0, 300),
-    check: String(p.check || "").slice(0, 300)
-  };
 }
 
 async function nextModule(env, chatId) {
   const s = await snapshot(env);
-  const modelPlan = await askDynamicNext(env, s);
-  const plan = modelPlan || fallbackNextModule(s);
-  await kvPut(env, "next_module", { version: VERSION, source: modelPlan ? "model+snapshot" : "fallback+snapshot", plan, snapshot: s, updated_at: new Date().toISOString() });
-  await send(env, chatId, renderNext(plan, modelPlan ? "model+snapshot" : "fallback+snapshot"));
+  const plan = nextModulePlan(s);
+  await kvPut(env, "next_module", { version: VERSION, source: "deterministic+snapshot", plan, snapshot: s, updated_at: new Date().toISOString() });
+  await send(env, chatId, renderNext(plan, "deterministic+snapshot"));
 }
 
 export default {
@@ -287,11 +229,10 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.self_inspector = VERSION;
-        d.dynamic_next_module = true;
-        d.command_allowlist = true;
-        d.inspector_commands = ["/inspect_self", "/next_module"];
+        d.control_layer = true;
+        d.commands = ["/level", "/inspect_self", "/next_module", "/last_auto_audit", "/growth_queue"];
       }
-      return json(d || { ok: true, self_inspector: VERSION, dynamic_next_module: true, command_allowlist: true }, r.status);
+      return json(d || { ok: true, self_inspector: VERSION, control_layer: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
@@ -299,15 +240,29 @@ export default {
       const m = getMsg(u);
       const low = String(m?.text || "").trim().toLowerCase();
 
+      if (m && (low === "/level" || low === "уровень" || low === "какой уровень" || low === "на каком уровне")) {
+        await send(env, m.chat.id, renderLevel(await snapshot(env)));
+        return json({ ok: true, handled_by: VERSION, level: true });
+      }
+
       if (m && (low === "/inspect_self" || low === "inspect self" || low === "проверь тело")) {
         await inspect(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION });
       }
 
       if (m && (low === "/next_module" || low === "следующий модуль")) {
-        await send(env, m.chat.id, "Выбираю следующий модуль по текущему состоянию...");
         await nextModule(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION });
+      }
+
+      if (m && (low === "/last_auto_audit" || low === "последний аудит")) {
+        await showLastAutoAudit(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, last_auto_audit: true });
+      }
+
+      if (m && (low === "/growth_queue" || low === "очередь роста")) {
+        await showGrowthQueue(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, growth_queue: true });
       }
     }
 
