@@ -1,5 +1,5 @@
 name = "miniskynet-core"
-main = "src/worker.js"
+main = "src/worker-natural.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
