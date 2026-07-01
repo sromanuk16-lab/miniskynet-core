@@ -1,0 +1,16 @@
+{
+  "memories": [
+    {
+      "time": "2026-07-01T00:00:00+00:00",
+      "agent": "system",
+      "signal": "MiniSkynet переходит от HTML-игрушки к Telegram Core.",
+      "lesson": "Чтобы ощущаться живым, агент должен сам писать владельцу и жить как отдельный процесс, а не ждать кнопку в HTML.",
+      "action": "Сначала запустить Telegram Core v0.1, потом добавлять self-update proposal.",
+      "check": "Бот отвечает на /start, /status и /think; память сохраняется в data/memories.json.",
+      "boundary": "Codespaces не является постоянным 24/7 сервером; alive loop работает только пока процесс запущен.",
+      "status": "rule",
+      "score": 90,
+      "privacy": "safe"
+    }
+  ]
+}
