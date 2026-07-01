@@ -64,6 +64,14 @@ venv.bak/
 logs/
 data/runtime/
 
+# Cloudflare / Node
+node_modules/
+.wrangler/
+.dev.vars
+cloudflare/.dev.vars
+cloudflare/node_modules/
+cloudflare/.wrangler/
+
 # OS/editor
 .DS_Store
 .idea/
