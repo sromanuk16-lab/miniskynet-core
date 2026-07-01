@@ -1,5 +1,5 @@
 name = "miniskynet-core"
-main = "src/worker-alive.js"
+main = "src/worker-intent.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
@@ -17,4 +17,4 @@ ALIVE_ENABLED = "false"
 ALIVE_OWNER_CHAT_ID = ""
 
 [triggers]
-crons = ["*/30 * * * *"]
+crons = ["*/10 * * * *"]
