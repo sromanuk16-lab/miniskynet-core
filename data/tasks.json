@@ -1,0 +1,19 @@
+{
+  "tasks": [
+    {
+      "id": "task_boot_001",
+      "title": "Проверить Telegram /start и OpenRouter /think.",
+      "agent": "core",
+      "status": "todo",
+      "priority": 9,
+      "retry_count": 0,
+      "max_retries": 2,
+      "created_at": "2026-07-01T00:00:00+00:00",
+      "started_at": null,
+      "finished_at": null,
+      "timeout_ms": 90000,
+      "result": null,
+      "blocked_reason": null
+    }
+  ]
+}
