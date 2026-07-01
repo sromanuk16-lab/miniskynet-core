@@ -9,9 +9,9 @@ id = "9d30973078944abea016a7e533a4bc88"
 
 [vars]
 OPENROUTER_MODEL_CHEAP = "openai/gpt-4o-mini"
-MAX_DAILY_COST_USD = "0.50"
-MAX_CYCLES_PER_DAY = "80"
-MAX_OUTPUT_TOKENS = "700"
+MAX_DAILY_COST_USD = "5.00"
+MAX_CYCLES_PER_DAY = "1000"
+MAX_OUTPUT_TOKENS = "900"
 
 [triggers]
 crons = ["*/10 * * * *"]
