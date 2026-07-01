@@ -173,7 +173,7 @@ class MiniSkynetTelegramBot:
                     pass
             await asyncio.sleep(self.config.alive_interval_seconds)
 
-    async def run(self) -> None:
+    def run(self) -> None:
         application = Application.builder().token(self.config.telegram_bot_token).build()
         application.add_handler(CommandHandler("start", self.start))
         application.add_handler(CommandHandler("help", self.help))
@@ -186,4 +186,4 @@ class MiniSkynetTelegramBot:
         application.add_handler(CommandHandler("alive_off", self.alive_off))
         application.add_handler(CommandHandler("cost", self.cost))
         print("✅ MiniSkynet Telegram bot started.")
-        await application.run_polling(close_loop=False)
+        application.run_polling()
