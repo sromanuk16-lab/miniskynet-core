@@ -1,6 +1,6 @@
 import styleWorker from "./worker-style.js";
 
-const WRAP = "focus-v0.9.1-safe";
+const WRAP = "focus-v0.9.2-safe-mode";
 const THINK_LOCK_MS = 90000;
 
 function json(data, status = 200) {
@@ -76,6 +76,8 @@ export default {
       if (data && typeof data === "object") {
         data.focus_wrapper = WRAP;
         data.focus = "core_improvement";
+        data.safe_mode = true;
+        data.scheduled_alive = "paused_by_wrapper";
         data.think_lock_ms = THINK_LOCK_MS;
         data.emergency_routes = ["стоп -> /alive_off", "ты тут -> /status"];
       }
@@ -114,5 +116,7 @@ export default {
 
     return await styleWorker.fetch(request, env, ctx);
   },
-  async scheduled(event, env, ctx) { return await styleWorker.scheduled(event, env, ctx); }
+  async scheduled(event, env, ctx) {
+    return;
+  }
 };
