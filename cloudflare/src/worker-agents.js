@@ -1,6 +1,6 @@
 import memoryWorker from "./worker-memory-hygiene.js";
 
-const VERSION = "agents-v2-runner";
+const VERSION = "agents-v3-strict";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -50,13 +50,13 @@ function defaultAgents() {
     { id: "memory", name: "Memory Agent", purpose: "Следит за чистотой памяти и отличает уроки от мусора.", allowed: ["inspect_memory", "suggest_cleanup"], output: ["keep", "archive", "reason"] },
     { id: "tester", name: "Tester Agent", purpose: "Определяет, какой командой проверить результат.", allowed: ["define_test", "check_expected_result"], output: ["command", "expected", "failure_signal"] },
     { id: "security", name: "Security Agent", purpose: "Следит за запретами: секреты, токены, опасные действия, лишняя автономность.", allowed: ["detect_risk", "block_bad_step"], output: ["risk", "block", "safe_alternative"] },
-    { id: "coder", name: "Coder Agent", purpose: "Описывает возможное изменение в существующих файлах, но сам ничего не применяет.", allowed: ["describe_change", "name_file", "define_check"], output: ["file", "change", "check"] }
+    { id: "coder", name: "Coder Agent", purpose: "Даёт точную инженерную спецификацию по существующим файлам: file, target, old_logic, new_logic, check.", allowed: ["describe_change", "name_file", "define_check"], output: ["file", "target", "old_logic", "new_logic", "check"] }
   ];
 }
 
 async function ensureAgents(env) {
   const data = await kvGet(env, "agent_registry", null);
-  if (data && Array.isArray(data.agents)) return data.agents;
+  if (data && data.version === VERSION && Array.isArray(data.agents)) return data.agents;
   const agents = defaultAgents();
   await kvPut(env, "agent_registry", { version: VERSION, agents, updated_at: new Date().toISOString() });
   return agents;
@@ -64,11 +64,11 @@ async function ensureAgents(env) {
 
 function renderAgents(agents) {
   return [
-    "Agent Registry v2:",
+    "Agent Registry v3:",
     ...agents.map(a => `${a.id} — ${a.purpose}`),
     "",
     "Команда: /agent critic <задача>",
-    "Теперь агенты вызывают модель со своей ролью, но остаются read-only."
+    "Coder Agent теперь должен давать file/target/old_logic/new_logic/check, а не общие советы."
   ].join("\n");
 }
 
@@ -76,9 +76,12 @@ async function contextForAgent(env) {
   const brain = await kvGet(env, "brain", {});
   const tasksData = await kvGet(env, "tasks", { tasks: [] });
   const memData = await kvGet(env, "memories", { memories: [] });
+  const archiveData = await kvGet(env, "memory_archive", { memories: [] });
   const growth = await kvGet(env, "growth_state", {});
+  const next = await kvGet(env, "next_module", null);
   const tasks = Array.isArray(tasksData.tasks) ? tasksData.tasks : [];
   const mem = Array.isArray(memData.memories) ? memData.memories : [];
+  const archive = Array.isArray(archiveData.memories) ? archiveData.memories : [];
   return {
     version: VERSION,
     alive: brain.alive_enabled === true,
@@ -86,26 +89,52 @@ async function contextForAgent(env) {
     tasks_total: tasks.length,
     active_tasks: tasks.filter(t => t.status !== "archived" && t.status !== "done").slice(-8).map(t => ({ type: t.type, status: t.status, title: t.title })),
     memories_total: mem.length,
+    memory_archive_total: archive.length,
     recent_memory: mem.slice(-5).map(m => ({ status: m.status, lesson: m.lesson, action: m.action })),
-    growth_stage: growth.stage || "unknown"
+    growth_stage: growth.stage || "unknown",
+    last_next_module: next?.plan || null
   };
 }
 
 function agentPrompt(agent, task, context) {
-  return [
+  const files = "cloudflare/src/worker-v1.js, cloudflare/src/worker-selfcheck.js, cloudflare/src/worker-memory-hygiene.js, cloudflare/src/worker-agents.js, cloudflare/src/worker-codemap.js, cloudflare/src/worker-inspector.js, cloudflare/wrangler.toml";
+  const base = [
     `Ты внутренний агент MiniSkynet: ${agent.name}.`,
     `Роль: ${agent.purpose}`,
     `Разрешённые действия: ${agent.allowed.join(", ")}`,
     "Строгие правила:",
     "- только анализ и предложение; не утверждай, что изменил код или состояние",
-    "- не выдумывай файлы; рабочие файлы: cloudflare/src/worker-v1.js, cloudflare/src/worker-selfcheck.js, cloudflare/src/worker-memory-hygiene.js, cloudflare/src/worker-agents.js, cloudflare/wrangler.toml",
+    `- не выдумывай файлы; рабочие файлы: ${files}`,
     "- не предлагай внешние проекты Сергея",
-    "- ответ короткий, по-русски, без общих фраз",
-    `Ожидаемые поля: ${agent.output.join(", ")}`,
+    "- не используй общие фразы вроде 'разработать интерфейс', 'оптимизировать', 'повысить стабильность'",
     `Состояние MiniSkynet: ${JSON.stringify(context)}`,
-    `Задача от Сергея: ${String(task || "текущий рост MiniSkynet").slice(0, 1200)}`,
-    "Верни простой текст в 3-5 строках."
-  ].join("\n");
+    `Задача от Сергея: ${String(task || "текущий рост MiniSkynet").slice(0, 1400)}`
+  ];
+
+  if (agent.id === "coder") {
+    return base.concat([
+      "Ответь строго в таком формате, без markdown:",
+      "file: <один рабочий файл>",
+      "target: <функция или блок>",
+      "old_logic: <что сейчас неправильно>",
+      "new_logic: <какая точная логика нужна>",
+      "check: <команда Telegram и ожидаемый результат>"
+    ]).join("\n");
+  }
+
+  if (agent.id === "tester") {
+    return base.concat([
+      "Ответь строго в таком формате, без markdown:",
+      "command: <команда Telegram>",
+      "expected: <что должно быть видно>",
+      "failure_signal: <что значит провал>"
+    ]).join("\n");
+  }
+
+  return base.concat([
+    `Ожидаемые поля: ${agent.output.join(", ")}`,
+    "Верни простой текст в 3-5 строках. Каждая строка должна быть конкретной: файл, команда, риск или проверка."
+  ]).join("\n");
 }
 
 async function askAgentModel(env, agent, task) {
@@ -119,11 +148,11 @@ async function askAgentModel(env, agent, task) {
     body: JSON.stringify({
       model: env.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini",
       messages: [
-        { role: "system", content: "Russian language. Be concrete. Do not claim you changed files." },
+        { role: "system", content: "Russian language. Be concrete. Do not claim you changed files. No vague advice." },
         { role: "user", content: prompt }
       ],
-      temperature: 0.2,
-      max_tokens: 500
+      temperature: agent.id === "coder" ? 0.05 : 0.15,
+      max_tokens: agent.id === "coder" ? 650 : 500
     })
   });
   const data = await res.json().catch(() => ({}));
@@ -138,9 +167,9 @@ function fallbackAgent(agent, task) {
   if (agent.id === "critic") return [`Critic Agent:`, `Finding: риск — слишком быстро усложнить ядро по задаче: ${t}.`, "Risk: память/задачи снова станут шумными.", "Next step: /level затем один маленький патч."].join("\n");
   if (agent.id === "planner") return [`Planner Agent:`, `Goal: ${t}`, "Plan: 1) проверить /level 2) выбрать один блокер 3) сделать один маленький слой 4) проверить командой.", "Check: /level показывает меньше слабостей."].join("\n");
   if (agent.id === "memory") return [`Memory Agent:`, `Object: ${t}`, "Keep: реальные уроки, файлы, проверки.", "Archive: общие фразы, дубли, фантазии.", "Next step: /memory_hygiene."].join("\n");
-  if (agent.id === "tester") return [`Tester Agent:`, `Check target: ${t}`, "Command: /level", "Expected: команды отвечают без [object Object] и без выдуманных файлов."].join("\n");
+  if (agent.id === "tester") return [`Tester Agent:`, `Check target: ${t}`, "Command: /inspect_self", "Expected: версия v4 или новее, без пути .js в поле Команда.", "Failure: /next_module снова пишет cloudflare/src/*.js как команду."].join("\n");
   if (agent.id === "security") return [`Security Agent:`, `Review: ${t}`, "Risk: нельзя давать автономные действия без подтверждения.", "Safe path: read-only analysis, approve gate позже."].join("\n");
-  if (agent.id === "coder") return [`Coder Agent:`, `Idea: ${t}`, "File: существующий worker или отдельный wrapper.", "Change: минимальный, проверяемый, без auto-action.", "Check: команда после деплоя показывает ожидаемый признак."].join("\n");
+  if (agent.id === "coder") return [`Coder Agent:`, "file: cloudflare/src/worker-inspector.js", "target: askDynamicNext", "old_logic: модель может вернуть путь .js вместо Telegram-команды", "new_logic: отклонять ответ, если command не начинается с '/' или содержит .js/cloudflare", "check: /next_module не показывает путь .js в поле Команда"].join("\n");
   return `${agent.name}: задача принята, но режим ещё простой.`;
 }
 
@@ -158,10 +187,10 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.agent_registry = VERSION;
-        d.agent_runner = "model_read_only";
+        d.agent_runner = "model_read_only_strict";
         d.agent_commands = ["/agents", "/agent <id> <task>"];
       }
-      return json(d || { ok: true, agent_registry: VERSION, agent_runner: "model_read_only" }, r.status);
+      return json(d || { ok: true, agent_registry: VERSION, agent_runner: "model_read_only_strict" }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
