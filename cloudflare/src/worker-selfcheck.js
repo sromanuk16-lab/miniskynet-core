@@ -1,6 +1,6 @@
 import coreWorker from "./worker-v1.js";
 
-const VERSION = "selfcheck-v3-alive-growth";
+const VERSION = "selfcheck-v4-level";
 const AUTO_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -32,6 +32,20 @@ async function kvPut(env, key, value) {
 
 async function getBrain(env) {
   return await kvGet(env, "brain", { alive_enabled: false, owner_chat_id: "", stats: { cycles_total: 0, daily: {} }, messages: [] });
+}
+
+async function getTasks(env) {
+  const data = await kvGet(env, "tasks", { tasks: [] });
+  return Array.isArray(data.tasks) ? data.tasks : [];
+}
+
+async function getMemories(env) {
+  const data = await kvGet(env, "memories", { memories: [] });
+  return Array.isArray(data.memories) ? data.memories : [];
+}
+
+async function getGrowth(env) {
+  return await kvGet(env, "growth_state", { stage: "core_stability", target: "безопасно писать и использовать агентов как код", last_audit_at: null });
 }
 
 async function saveBrain(env, brain) {
@@ -129,6 +143,70 @@ async function askAudit(env) {
   return formatAnswer(parsed, raw) + `\n\nusage: in=${data?.usage?.prompt_tokens || "?"} out=${data?.usage?.completion_tokens || "?"}`;
 }
 
+function dayStats(brain) {
+  const key = new Date().toISOString().slice(0, 10);
+  return brain.stats?.daily?.[key] || { cycles: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
+}
+
+function countActiveTasks(tasks) {
+  return tasks.filter(t => t.status !== "archived" && t.status !== "done").length;
+}
+
+function countCoreTasks(tasks) {
+  return tasks.filter(t => (t.type || "") === "core" && t.status !== "archived" && t.status !== "done").length;
+}
+
+function detectLevel(brain, tasks, memories, growth) {
+  const active = countActiveTasks(tasks);
+  const core = countCoreTasks(tasks);
+  const mem = memories.length;
+  const alive = brain.alive_enabled === true;
+  let score = 1.0;
+  if (brain.stats?.cycles_total > 0) score += 0.3;
+  if (mem >= 5) score += 0.3;
+  if (core >= 1) score += 0.2;
+  if (growth?.last_audit_at) score += 0.3;
+  if (alive) score += 0.2;
+  if (active > 40) score -= 0.2;
+  return Math.max(1, Math.min(2.5, Number(score.toFixed(1))));
+}
+
+function levelName(score) {
+  if (score < 1.5) return "Level 1 — Clean Core";
+  if (score < 2.0) return "Level 1.5 — Clean Core + ранний self-audit";
+  return "Level 2 — Memory/Task Hygiene начинается";
+}
+
+async function levelText(env) {
+  const brain = await getBrain(env);
+  const tasks = await getTasks(env);
+  const memories = await getMemories(env);
+  const growth = await getGrowth(env);
+  const st = dayStats(brain);
+  const score = detectLevel(brain, tasks, memories, growth);
+  const active = countActiveTasks(tasks);
+  const core = countCoreTasks(tasks);
+  const broken = [];
+  if (active > 40) broken.push("очередь задач раздута");
+  if (memories.length > 20) broken.push("память уже шумная");
+  if (!growth?.last_audit_at) broken.push("self-audit ещё не закреплён");
+  if (brain.alive_enabled !== true) broken.push("alive выключен");
+  if (!broken.length) broken.push("критичных блокеров не вижу");
+  return [
+    `Уровень: ${score}/10`,
+    `Стадия: ${levelName(score)}`,
+    `Думает: только по запросу, /self_audit или alive tick; не непрерывно.`,
+    `Обучается: не весами модели, а памятью, задачами и изменениями кода через будущий approve/apply.`,
+    `Alive: ${brain.alive_enabled === true ? "true" : "false"}`,
+    `Циклы: всего ${brain.stats?.cycles_total || 0}, сегодня ${st.cycles || 0}`,
+    `Память: ${memories.length}`,
+    `Задачи: всего ${tasks.length}, активных ${active}, core ${core}`,
+    `Growth stage: ${growth.stage || "unknown"}`,
+    `Сломано/слабо: ${broken.join("; ")}`,
+    `Следующий шаг: /tasks_hygiene, затем /self_audit. Если ответ нормальный — двигаемся к Agent Registry.`
+  ].join("\n");
+}
+
 async function enableAlive(env, chatId) {
   const brain = await getBrain(env);
   brain.alive_enabled = true;
@@ -158,15 +236,21 @@ export default {
         d.selfcheck_wrapper = VERSION;
         d.format_answer_hotfix = true;
         d.alive_growth = true;
+        d.level_command = true;
         d.auto_interval_minutes = AUTO_INTERVAL_MS / 60000;
       }
-      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true }, r.status);
+      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, level_command: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       const u = await request.clone().json().catch(() => null);
       const m = getMsg(u);
       const text = String(m?.text || "").trim().toLowerCase();
+
+      if (m && (text === "/level" || text === "уровень" || text === "какой уровень" || text === "на каком уровне")) {
+        await send(env, m.chat.id, await levelText(env));
+        return json({ ok: true, handled_by: VERSION, level: true });
+      }
 
       if (m && (text === "/alive_on" || text === "включи alive" || text === "включи самообучение" || text === "включи автообучение" || text === "живой режим")) {
         await enableAlive(env, m.chat.id);
