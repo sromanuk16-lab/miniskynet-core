@@ -1,0 +1,22 @@
+name = "miniskynet-core"
+main = "src/worker.js"
+compatibility_date = "2026-07-01"
+workers_dev = true
+
+# After creating KV in Cloudflare, replace the id below.
+# Command from PC later: wrangler kv:namespace create MINISKYNET_KV
+[[kv_namespaces]]
+binding = "MINISKYNET_KV"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+[vars]
+OPENROUTER_MODEL_CHEAP = "openai/gpt-4o-mini"
+OPENROUTER_MODEL_CODING = "openai/gpt-4o-mini"
+MAX_DAILY_COST_USD = "0.50"
+MAX_CYCLES_PER_DAY = "20"
+MAX_OUTPUT_TOKENS = "800"
+ALIVE_ENABLED = "false"
+ALIVE_OWNER_CHAT_ID = ""
+
+[triggers]
+crons = ["*/30 * * * *"]
