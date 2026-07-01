@@ -1,6 +1,7 @@
 import coreWorker from "./worker-v1.js";
 
-const VERSION = "selfcheck-v2-format-answer";
+const VERSION = "selfcheck-v3-alive-growth";
+const AUTO_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -19,9 +20,27 @@ async function hydrate(env) {
   }
 }
 
+async function kvGet(env, key, fallback) {
+  const raw = await env.MINISKYNET_KV.get(key);
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch (_) { return fallback; }
+}
+
+async function kvPut(env, key, value) {
+  await env.MINISKYNET_KV.put(key, JSON.stringify(value, null, 2));
+}
+
+async function getBrain(env) {
+  return await kvGet(env, "brain", { alive_enabled: false, owner_chat_id: "", stats: { cycles_total: 0, daily: {} }, messages: [] });
+}
+
+async function saveBrain(env, brain) {
+  await kvPut(env, "brain", brain);
+}
+
 async function send(env, chatId, text) {
   await hydrate(env);
-  if (!env.TELEGRAM_BOT_TOKEN) return;
+  if (!env.TELEGRAM_BOT_TOKEN || !chatId) return;
   await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/sendMessage`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -67,10 +86,10 @@ function formatAnswer(parsed, raw) {
 function fallbackText() {
   return [
     "Уровень: Clean Core.",
-    "Слабость: ответ модели может прийти объектом, а ядро выводит его как [object Object].",
-    "Следующий патч: в cloudflare/src/worker-v1.js добавить formatAnswer() для parsed.answer.",
-    "Риск: можно сломать обычные ответы, если неправильно обработать JSON.",
-    "Проверка: /self_audit должен вернуть эти 5 строк нормальным текстом, без [object Object]."
+    "Слабость: alive_on был только обычным текстом для модели, а не настоящей командой включения.",
+    "Следующий патч: в worker-selfcheck.js добавить реальное включение alive и scheduled growth tick.",
+    "Риск: если tick будет слишком частым, снова появится спам.",
+    "Проверка: после фразы 'включи alive' команда /status должна показать alive: true."
   ].join("\n");
 }
 
@@ -110,6 +129,24 @@ async function askAudit(env) {
   return formatAnswer(parsed, raw) + `\n\nusage: in=${data?.usage?.prompt_tokens || "?"} out=${data?.usage?.completion_tokens || "?"}`;
 }
 
+async function enableAlive(env, chatId) {
+  const brain = await getBrain(env);
+  brain.alive_enabled = true;
+  brain.owner_chat_id = String(chatId || brain.owner_chat_id || "");
+  brain.alive_mode = "growth";
+  brain.alive_updated_at = new Date().toISOString();
+  await saveBrain(env, brain);
+  await send(env, chatId, "Alive Growth включён. Теперь это реальный флаг в KV, а не просто ответ модели. Я буду делать редкий self-audit по cron без спама.");
+}
+
+async function disableAlive(env, chatId) {
+  const brain = await getBrain(env);
+  brain.alive_enabled = false;
+  brain.alive_updated_at = new Date().toISOString();
+  await saveBrain(env, brain);
+  await send(env, chatId, "Alive выключен.");
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -120,14 +157,27 @@ export default {
       if (d && typeof d === "object") {
         d.selfcheck_wrapper = VERSION;
         d.format_answer_hotfix = true;
+        d.alive_growth = true;
+        d.auto_interval_minutes = AUTO_INTERVAL_MS / 60000;
       }
-      return json(d || { ok: true, selfcheck_wrapper: VERSION, format_answer_hotfix: true }, r.status);
+      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       const u = await request.clone().json().catch(() => null);
       const m = getMsg(u);
       const text = String(m?.text || "").trim().toLowerCase();
+
+      if (m && (text === "/alive_on" || text === "включи alive" || text === "включи самообучение" || text === "включи автообучение" || text === "живой режим")) {
+        await enableAlive(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, alive: true });
+      }
+
+      if (m && (text === "/alive_off" || text === "выключи alive" || text === "выключи самообучение" || text === "стоп")) {
+        await disableAlive(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, alive: false });
+      }
+
       if (m && (text === "/self_audit" || text === "/grow_one" || text === "самоаудит" || text === "проверь себя")) {
         await send(env, m.chat.id, "Думаю...");
         const answer = await askAudit(env);
@@ -140,6 +190,14 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    return;
+    await hydrate(env);
+    const brain = await getBrain(env);
+    if (brain.alive_enabled !== true || !brain.owner_chat_id) return;
+    const last = Number(await env.MINISKYNET_KV.get("runtime:last_alive_growth_ms") || 0);
+    const ms = Date.now();
+    if (last && ms - last < AUTO_INTERVAL_MS) return;
+    await env.MINISKYNET_KV.put("runtime:last_alive_growth_ms", String(ms));
+    const answer = await askAudit(env);
+    await send(env, brain.owner_chat_id, "Alive Growth tick:\n" + answer);
   }
 };
