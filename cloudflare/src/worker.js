@@ -8,16 +8,35 @@ function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), { status, headers: JSON_HEADERS });
 }
 
-function textResponse(text, status = 200) {
-  return new Response(text, { status, headers: { "content-type": "text/plain; charset=utf-8" } });
-}
-
 function requireEnv(env) {
   const missing = [];
   if (!env.MINISKYNET_KV) missing.push("MINISKYNET_KV binding");
   if (!env.TELEGRAM_BOT_TOKEN) missing.push("TELEGRAM_BOT_TOKEN");
   if (!env.OPENROUTER_API_KEY) missing.push("OPENROUTER_API_KEY");
   return missing;
+}
+
+async function hydrateEnv(env) {
+  if (!env.MINISKYNET_KV) return env;
+  const keys = [
+    "TELEGRAM_BOT_TOKEN",
+    "OPENROUTER_API_KEY",
+    "SETUP_SECRET",
+    "TELEGRAM_ALLOWED_USER_ID",
+    "OPENROUTER_MODEL_CHEAP",
+    "OPENROUTER_MODEL_CODING",
+    "MAX_DAILY_COST_USD",
+    "MAX_CYCLES_PER_DAY",
+    "MAX_OUTPUT_TOKENS",
+    "ALIVE_OWNER_CHAT_ID"
+  ];
+  for (const key of keys) {
+    if (!env[key]) {
+      const value = await env.MINISKYNET_KV.get("config:" + key);
+      if (value) env[key] = String(value).trim();
+    }
+  }
+  return env;
 }
 
 async function getJSON(env, key, fallback) {
@@ -37,7 +56,7 @@ async function putJSON(env, key, value) {
 
 async function getBrain(env) {
   return await getJSON(env, "brain", {
-    version: "cf-0.1.0",
+    version: "cf-0.1.1",
     created_at: nowIso(),
     alive_enabled: false,
     owner_chat_id: env.ALIVE_OWNER_CHAT_ID || "",
@@ -368,6 +387,7 @@ async function setupWebhook(env, request) {
 }
 
 async function scheduledTick(env) {
+  await hydrateEnv(env);
   const missing = requireEnv(env);
   if (missing.length) return;
   const brain = await getBrain(env);
@@ -390,11 +410,12 @@ async function scheduledTick(env) {
 
 export default {
   async fetch(request, env) {
+    await hydrateEnv(env);
     const url = new URL(request.url);
     const missing = requireEnv(env);
 
     if (url.pathname === "/") {
-      return jsonResponse({ ok: true, service: "MiniSkynet Cloudflare Core", version: "cf-0.1.0", missing });
+      return jsonResponse({ ok: true, service: "MiniSkynet Cloudflare Core", version: "cf-0.1.1", missing });
     }
     if (url.pathname === "/setup-webhook") return await setupWebhook(env, request);
     if (url.pathname === "/telegram" && request.method === "POST") {
