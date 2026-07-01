@@ -1,6 +1,6 @@
 import coreWorker from "./worker-v1.js";
 
-const VERSION = "selfcheck-v5-grounded-alive";
+const VERSION = "selfcheck-v6-auto-audit";
 const AUTO_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -83,7 +83,7 @@ function valueToText(v) {
   if (typeof v === "number" || typeof v === "boolean") return String(v);
   if (Array.isArray(v)) return v.map(valueToText).filter(Boolean).join("\n");
   if (typeof v === "object") {
-    const preferred = ["Уровень", "level", "Слабость", "weakness", "Следующий патч", "next_patch", "Риск", "risk", "Проверка", "check", "answer"];
+    const preferred = ["Уровень", "level", "Слабость", "weakness", "Файл", "file", "Цель", "target", "Новая логика", "new_logic", "Риск", "risk", "Проверка", "check", "answer"];
     const keys = Object.keys(v);
     const ordered = [...preferred.filter(k => keys.includes(k)), ...keys.filter(k => !preferred.includes(k))];
     return ordered.map(k => `${k}: ${valueToText(v[k])}`).join("\n");
@@ -99,25 +99,34 @@ function formatAnswer(parsed, raw) {
 
 function fallbackText() {
   return [
-    "Уровень: Clean Core.",
-    "Слабость: self-audit ещё может фантазировать о файлах, которых нет в репозитории.",
-    "Следующий патч: ограничить /self_audit существующими файлами cloudflare/src/worker-v1.js и cloudflare/src/worker-selfcheck.js.",
-    "Риск: ответы станут менее свободными, зато честнее.",
-    "Проверка: /self_audit не должен предлагать refactor_core.py, schedule_audit.py и другие несуществующие файлы."
+    "Уровень: Auto Audit baseline.",
+    "Слабость: ответы модели могут быть общими, если не заставить её указывать файл и проверку.",
+    "Файл: cloudflare/src/worker-agents.js",
+    "Цель: agentPrompt для coder/tester.",
+    "Новая логика: требовать file, target, old_logic, new_logic, check; отбрасывать воду.",
+    "Риск: слишком строгий формат может чаще включать fallback.",
+    "Проверка: /agent coder тест должен вернуть file/target/old_logic/new_logic/check."
   ].join("\n");
 }
 
 function auditPrompt() {
   return [
-    "STRICT SELF-AUDIT MiniSkynet.",
+    "STRICT AUTO AUDIT MiniSkynet.",
     "Ответ должен быть конкретным, техническим и grounded.",
-    "Запрещены общие фразы: недостаток практического опыта, собрать информацию, улучшить функциональность, оптимизировать процессы.",
-    "Запрещено выдумывать файлы. Существующие рабочие файлы сейчас только: cloudflare/src/worker-v1.js, cloudflare/src/worker-selfcheck.js, cloudflare/wrangler.toml.",
-    "Если предлагаешь патч, называй только один из этих файлов или пиши 'нужен новый файл' и зачем.",
-    "Оцени текущий путь роста: Clean Core, Task Hygiene, Self-Audit, Agent Registry, Self-Update Proposal, Agents as Code.",
-    "Верни JSON. Поле answer может быть объектом или строкой, но должно содержать эти 5 пунктов:",
-    "Уровень, Слабость, Следующий патч, Риск, Проверка.",
-    "Не предлагай внешние проекты. Не предлагай auto-apply. Не предлагай python-файлы: refactor_core.py, update_task_docs.py, schedule_audit.py, optimize_registry.py."
+    "Запрещены общие фразы: недостаток практического опыта, собрать информацию, улучшить функциональность, оптимизировать процессы, повысить стабильность.",
+    "Запрещено выдумывать файлы.",
+    "Существующие рабочие файлы сейчас только:",
+    "- cloudflare/src/worker-v1.js",
+    "- cloudflare/src/worker-selfcheck.js",
+    "- cloudflare/src/worker-memory-hygiene.js",
+    "- cloudflare/src/worker-agents.js",
+    "- cloudflare/src/worker-codemap.js",
+    "- cloudflare/src/worker-inspector.js",
+    "- cloudflare/wrangler.toml",
+    "Нужно найти один реальный следующий инженерный шаг. Не пиши код. Не утверждай, что что-то уже изменено.",
+    "Верни JSON. Поле answer должно содержать эти пункты:",
+    "Уровень, Слабость, Файл, Цель, Новая логика, Риск, Проверка.",
+    "Файл должен быть только из списка выше. Проверка должна быть Telegram-командой."
   ].join("\n");
 }
 
@@ -133,8 +142,8 @@ async function askAudit(env) {
         { role: "system", content: "Return valid JSON only. Russian language. Be concrete and grounded. Do not invent files." },
         { role: "user", content: auditPrompt() }
       ],
-      temperature: 0.1,
-      max_tokens: 650
+      temperature: 0.08,
+      max_tokens: 700
     })
   });
   const data = await res.json().catch(() => ({}));
@@ -169,13 +178,13 @@ function detectLevel(brain, tasks, memories, growth) {
   if (growth?.last_audit_at) score += 0.3;
   if (alive) score += 0.2;
   if (active > 40) score -= 0.2;
-  return Math.max(1, Math.min(2.5, Number(score.toFixed(1))));
+  return Math.max(1, Math.min(2.8, Number(score.toFixed(1))));
 }
 
 function levelName(score) {
   if (score < 1.5) return "Level 1 — Clean Core";
   if (score < 2.0) return "Level 1.5 — Clean Core + ранний self-audit";
-  return "Level 2 — Memory/Task Hygiene начинается";
+  return "Level 2 — Memory/Task Hygiene + Auto Audit";
 }
 
 async function levelText(env) {
@@ -196,15 +205,15 @@ async function levelText(env) {
   return [
     `Уровень: ${score}/10`,
     `Стадия: ${levelName(score)}`,
-    `Думает: только по запросу, /self_audit или alive tick; не непрерывно.`,
-    `Обучается: не весами модели, а памятью, задачами и изменениями кода через будущий approve/apply.`,
+    `Думает: по запросу, /self_audit или alive tick; alive tick теперь делает auto audit.`,
+    `Обучается: памятью, задачами, картой кода и инженерными спецификациями.`,
     `Alive: ${brain.alive_enabled === true ? "true" : "false"}`,
     `Циклы: всего ${brain.stats?.cycles_total || 0}, сегодня ${st.cycles || 0}`,
     `Память: ${memories.length}`,
     `Задачи: всего ${tasks.length}, активных ${active}, core ${core}`,
     `Growth stage: ${growth.stage || "unknown"}`,
     `Сломано/слабо: ${broken.join("; ")}`,
-    `Следующий шаг: /tasks_hygiene, затем /self_audit. Если ответ grounded — двигаемся к Agent Registry.`
+    `Следующий шаг: дождаться alive tick или вызвать /self_audit; затем проверять точность через /agent tester.`
   ].join("\n");
 }
 
@@ -215,7 +224,7 @@ async function enableAlive(env, chatId) {
   brain.alive_mode = "growth";
   brain.alive_updated_at = new Date().toISOString();
   await saveBrain(env, brain);
-  await send(env, chatId, "Alive Growth включён. Теперь это реальный флаг в KV. Автотик будет редким и grounded: без выдуманных файлов и без auto-apply.");
+  await send(env, chatId, "Alive Growth включён. Теперь раз в 30 минут будет автоматический grounded audit: файл, цель, новая логика, риск, проверка.");
 }
 
 async function disableAlive(env, chatId) {
@@ -228,11 +237,16 @@ async function disableAlive(env, chatId) {
 
 async function aliveTick(env) {
   const level = await levelText(env);
+  const audit = await askAudit(env);
+  await kvPut(env, "last_auto_audit", { version: VERSION, level, audit, updated_at: new Date().toISOString() });
   return [
     "Alive Growth tick:",
     level,
     "",
-    "Автовывод: я не пишу код сама и не выдумываю файлы. Следующий безопасный шаг — очистить задачи и сделать grounded /self_audit."
+    "Auto Audit:",
+    audit,
+    "",
+    "Статус: найдено автоматически, без ручного запроса. Код не менялся."
   ].join("\n");
 }
 
@@ -249,9 +263,10 @@ export default {
         d.alive_growth = true;
         d.grounded_alive = true;
         d.level_command = true;
+        d.auto_audit = true;
         d.auto_interval_minutes = AUTO_INTERVAL_MS / 60000;
       }
-      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, grounded_alive: true, level_command: true }, r.status);
+      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, grounded_alive: true, level_command: true, auto_audit: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
