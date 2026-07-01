@@ -1,6 +1,6 @@
 import codeMapWorker from "./worker-codemap.js";
 
-const VERSION = "inspector-v3-loop-guard";
+const VERSION = "inspector-v4-output-filter";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -55,6 +55,11 @@ function safeFiles() {
   ];
 }
 
+function mentionsMemoryStep(x) {
+  const t = String(x || "").toLowerCase();
+  return t.includes("memory hygiene") || t.includes("memory-hygiene") || t.includes("/memory_hygiene") || t.includes("гигиен") || t.includes("памят");
+}
+
 async function snapshot(env) {
   const brain = await kvGet(env, "brain", {});
   const tasksData = await kvGet(env, "tasks", { tasks: [] });
@@ -99,14 +104,14 @@ function weaknesses(s) {
 function inspectText(s) {
   const body = s.code_files.length ? s.code_files : safeFiles();
   return [
-    "Self Inspection v3:",
+    "Self Inspection v4:",
     `Активный слой: ${s.active_layer}`,
     "Текущее тело:",
     ...body.map(x => "- " + x),
     "Что умею: level, alive, memory hygiene, agent runner, code map, file role, self inspection, dynamic next module.",
     `Состояние: alive=${s.alive}, cycles=${s.cycles_total}, memories=${s.memories_total}, archived_memories=${s.memory_archive_total}, tasks=${s.tasks_total}, active_tasks=${s.active_tasks}, agents=${s.agents_total}`,
     `Главная слабость: ${weaknesses(s).join("; ")}`,
-    "Следующий безопасный шаг выбирается через /next_module. Если чистка памяти уже была, шаг не должен застревать на ней."
+    "Следующий безопасный шаг выбирается через /next_module. Ответ модели фильтруется: команда должна быть реальной Telegram-командой."
   ].join("\n");
 }
 
@@ -194,11 +199,12 @@ async function askDynamicNext(env, s) {
     "Опирайся только на состояние системы, code map и текущие ограничения.",
     "Не утверждай что файлы изменены, не выдумывай внешние проекты.",
     "Разрешённые направления: refresh code_map, memory hygiene, task hygiene, tests plan, agent registry improvement, loop guard.",
+    "Если memories_total<=20, НЕ выбирай memory hygiene.",
     "Если memory_cleanup_seen=true, НЕ выбирай memory hygiene повторно. Выбери loop guard или engineering review note.",
     "Рабочие файлы:",
     ...safeFiles().map(x => "- " + x),
     `Состояние: ${JSON.stringify(s)}`,
-    "Верни JSON только с полями: title, command, reason, risk, check. Command должен быть существующей Telegram-командой."
+    "Верни JSON только с полями: title, command, reason, risk, check. Command должен начинаться с '/'. Нельзя ставить путь к файлу в command."
   ].join("\n");
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -210,7 +216,7 @@ async function askDynamicNext(env, s) {
         { role: "system", content: "Return valid JSON only. Russian language. Be concrete." },
         { role: "user", content: prompt }
       ],
-      temperature: 0.15,
+      temperature: 0.1,
       max_tokens: 450
     })
   });
@@ -219,10 +225,17 @@ async function askDynamicNext(env, s) {
   const raw = data?.choices?.[0]?.message?.content || "";
   const p = parseJsonish(raw);
   if (!p || !p.title || !p.command) return null;
-  if (s.memory_cleanup_seen && String(p.command || "").includes("/memory_hygiene")) return null;
+
+  const joined = [p.title, p.command, p.reason, p.check].join(" ");
+  const command = String(p.command || "").trim();
+  if (!command.startsWith("/")) return null;
+  if (command.includes("cloudflare/") || command.includes(".js")) return null;
+  if (s.memories_total <= 20 && mentionsMemoryStep(joined)) return null;
+  if (s.memory_cleanup_seen && mentionsMemoryStep(joined)) return null;
+
   return {
     title: String(p.title).slice(0, 120),
-    command: String(p.command).slice(0, 240),
+    command: command.slice(0, 240),
     reason: String(p.reason || "").slice(0, 500),
     risk: String(p.risk || "").slice(0, 300),
     check: String(p.check || "").slice(0, 300)
@@ -247,10 +260,10 @@ export default {
       if (d && typeof d === "object") {
         d.self_inspector = VERSION;
         d.dynamic_next_module = true;
-        d.loop_guard = true;
+        d.output_filter = true;
         d.inspector_commands = ["/inspect_self", "/next_module"];
       }
-      return json(d || { ok: true, self_inspector: VERSION, dynamic_next_module: true, loop_guard: true }, r.status);
+      return json(d || { ok: true, self_inspector: VERSION, dynamic_next_module: true, output_filter: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
