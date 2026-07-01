@@ -1,6 +1,6 @@
 import codeMapWorker from "./worker-codemap.js";
 
-const VERSION = "inspector-v4-output-filter";
+const VERSION = "inspector-v5-command-allowlist";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -60,6 +60,34 @@ function mentionsMemoryStep(x) {
   return t.includes("memory hygiene") || t.includes("memory-hygiene") || t.includes("/memory_hygiene") || t.includes("гигиен") || t.includes("памят");
 }
 
+function allowedCommand(command) {
+  const c = String(command || "").trim();
+  if (!c.startsWith("/")) return false;
+  if (c.includes("cloudflare/") || c.includes(".js")) return false;
+  if (c.startsWith("/agent ")) return true;
+  const exact = new Set([
+    "/start",
+    "/status",
+    "/level",
+    "/memory",
+    "/tasks",
+    "/cost",
+    "/inspect_self",
+    "/next_module",
+    "/code_map",
+    "/agents",
+    "/self_audit",
+    "/grow_one",
+    "/memory_hygiene",
+    "/tasks_hygiene",
+    "/alive_on",
+    "/alive_off"
+  ]);
+  if (exact.has(c)) return true;
+  if (c.startsWith("/file_role ")) return true;
+  return false;
+}
+
 async function snapshot(env) {
   const brain = await kvGet(env, "brain", {});
   const tasksData = await kvGet(env, "tasks", { tasks: [] });
@@ -104,14 +132,14 @@ function weaknesses(s) {
 function inspectText(s) {
   const body = s.code_files.length ? s.code_files : safeFiles();
   return [
-    "Self Inspection v4:",
+    "Self Inspection v5:",
     `Активный слой: ${s.active_layer}`,
     "Текущее тело:",
     ...body.map(x => "- " + x),
     "Что умею: level, alive, memory hygiene, agent runner, code map, file role, self inspection, dynamic next module.",
     `Состояние: alive=${s.alive}, cycles=${s.cycles_total}, memories=${s.memories_total}, archived_memories=${s.memory_archive_total}, tasks=${s.tasks_total}, active_tasks=${s.active_tasks}, agents=${s.agents_total}`,
     `Главная слабость: ${weaknesses(s).join("; ")}`,
-    "Следующий безопасный шаг выбирается через /next_module. Ответ модели фильтруется: команда должна быть реальной Telegram-командой."
+    "Следующий безопасный шаг выбирается через /next_module. Ответ модели фильтруется: команда должна быть реальной существующей Telegram-командой."
   ].join("\n");
 }
 
@@ -143,7 +171,7 @@ function fallbackNextModule(s) {
   if (s.memories_total > 20 && s.memory_cleanup_seen) {
     return {
       title: "Next Module Loop Guard",
-      command: "/agent coder дай точную правку для cloudflare/src/worker-inspector.js: если memory_hygiene уже запускалась, не повторяй этот же следующий шаг",
+      command: "/agent coder дай точную правку для worker-inspector.js: если memory_hygiene уже запускалась, не повторяй этот же следующий шаг",
       reason: "чистка памяти уже выполнялась, поэтому повторять её как следующий шаг нельзя; нужен guard от цикла.",
       risk: "слишком сложный выбор следующего шага будет трудно отлаживать",
       check: "/inspect_self затем /next_module"
@@ -198,13 +226,14 @@ async function askDynamicNext(env, s) {
     "Ты выбираешь следующий безопасный шаг роста MiniSkynet.",
     "Опирайся только на состояние системы, code map и текущие ограничения.",
     "Не утверждай что файлы изменены, не выдумывай внешние проекты.",
-    "Разрешённые направления: refresh code_map, memory hygiene, task hygiene, tests plan, agent registry improvement, loop guard.",
+    "Разрешённые направления: refresh code_map, memory hygiene, task hygiene, tests plan, agent registry improvement, cycle protection.",
     "Если memories_total<=20, НЕ выбирай memory hygiene.",
-    "Если memory_cleanup_seen=true, НЕ выбирай memory hygiene повторно. Выбери loop guard или engineering review note.",
+    "Если memory_cleanup_seen=true, НЕ выбирай memory hygiene повторно.",
+    "Нельзя придумывать новые команды. Разрешённые команды: /code_map, /inspect_self, /level, /tasks_hygiene, /memory_hygiene, /agents, /agent <id> <task>, /self_audit, /grow_one, /status.",
     "Рабочие файлы:",
     ...safeFiles().map(x => "- " + x),
     `Состояние: ${JSON.stringify(s)}`,
-    "Верни JSON только с полями: title, command, reason, risk, check. Command должен начинаться с '/'. Нельзя ставить путь к файлу в command."
+    "Верни JSON только с полями: title, command, reason, risk, check. Command должен быть одной из разрешённых команд."
   ].join("\n");
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -216,7 +245,7 @@ async function askDynamicNext(env, s) {
         { role: "system", content: "Return valid JSON only. Russian language. Be concrete." },
         { role: "user", content: prompt }
       ],
-      temperature: 0.1,
+      temperature: 0.05,
       max_tokens: 450
     })
   });
@@ -228,8 +257,7 @@ async function askDynamicNext(env, s) {
 
   const joined = [p.title, p.command, p.reason, p.check].join(" ");
   const command = String(p.command || "").trim();
-  if (!command.startsWith("/")) return null;
-  if (command.includes("cloudflare/") || command.includes(".js")) return null;
+  if (!allowedCommand(command)) return null;
   if (s.memories_total <= 20 && mentionsMemoryStep(joined)) return null;
   if (s.memory_cleanup_seen && mentionsMemoryStep(joined)) return null;
 
@@ -260,10 +288,10 @@ export default {
       if (d && typeof d === "object") {
         d.self_inspector = VERSION;
         d.dynamic_next_module = true;
-        d.output_filter = true;
+        d.command_allowlist = true;
         d.inspector_commands = ["/inspect_self", "/next_module"];
       }
-      return json(d || { ok: true, self_inspector: VERSION, dynamic_next_module: true, output_filter: true }, r.status);
+      return json(d || { ok: true, self_inspector: VERSION, dynamic_next_module: true, command_allowlist: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
