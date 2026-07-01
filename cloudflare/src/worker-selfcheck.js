@@ -1,6 +1,6 @@
 import coreWorker from "./worker-v1.js";
 
-const VERSION = "selfcheck-v4-level";
+const VERSION = "selfcheck-v5-grounded-alive";
 const AUTO_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -100,23 +100,24 @@ function formatAnswer(parsed, raw) {
 function fallbackText() {
   return [
     "Уровень: Clean Core.",
-    "Слабость: alive_on был только обычным текстом для модели, а не настоящей командой включения.",
-    "Следующий патч: в worker-selfcheck.js добавить реальное включение alive и scheduled growth tick.",
-    "Риск: если tick будет слишком частым, снова появится спам.",
-    "Проверка: после фразы 'включи alive' команда /status должна показать alive: true."
+    "Слабость: self-audit ещё может фантазировать о файлах, которых нет в репозитории.",
+    "Следующий патч: ограничить /self_audit существующими файлами cloudflare/src/worker-v1.js и cloudflare/src/worker-selfcheck.js.",
+    "Риск: ответы станут менее свободными, зато честнее.",
+    "Проверка: /self_audit не должен предлагать refactor_core.py, schedule_audit.py и другие несуществующие файлы."
   ].join("\n");
 }
 
 function auditPrompt() {
   return [
     "STRICT SELF-AUDIT MiniSkynet.",
-    "Ответ должен быть конкретным и техническим.",
+    "Ответ должен быть конкретным, техническим и grounded.",
     "Запрещены общие фразы: недостаток практического опыта, собрать информацию, улучшить функциональность, оптимизировать процессы.",
+    "Запрещено выдумывать файлы. Существующие рабочие файлы сейчас только: cloudflare/src/worker-v1.js, cloudflare/src/worker-selfcheck.js, cloudflare/wrangler.toml.",
+    "Если предлагаешь патч, называй только один из этих файлов или пиши 'нужен новый файл' и зачем.",
     "Оцени текущий путь роста: Clean Core, Task Hygiene, Self-Audit, Agent Registry, Self-Update Proposal, Agents as Code.",
     "Верни JSON. Поле answer может быть объектом или строкой, но должно содержать эти 5 пунктов:",
     "Уровень, Слабость, Следующий патч, Риск, Проверка.",
-    "Следующий патч должен назвать конкретный файл, модуль или команду.",
-    "Не предлагай внешние проекты. Не предлагай auto-apply."
+    "Не предлагай внешние проекты. Не предлагай auto-apply. Не предлагай python-файлы: refactor_core.py, update_task_docs.py, schedule_audit.py, optimize_registry.py."
   ].join("\n");
 }
 
@@ -129,11 +130,11 @@ async function askAudit(env) {
     body: JSON.stringify({
       model: env.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini",
       messages: [
-        { role: "system", content: "Return valid JSON only. Russian language. Be concrete." },
+        { role: "system", content: "Return valid JSON only. Russian language. Be concrete and grounded. Do not invent files." },
         { role: "user", content: auditPrompt() }
       ],
-      temperature: 0.15,
-      max_tokens: 700
+      temperature: 0.1,
+      max_tokens: 650
     })
   });
   const data = await res.json().catch(() => ({}));
@@ -203,7 +204,7 @@ async function levelText(env) {
     `Задачи: всего ${tasks.length}, активных ${active}, core ${core}`,
     `Growth stage: ${growth.stage || "unknown"}`,
     `Сломано/слабо: ${broken.join("; ")}`,
-    `Следующий шаг: /tasks_hygiene, затем /self_audit. Если ответ нормальный — двигаемся к Agent Registry.`
+    `Следующий шаг: /tasks_hygiene, затем /self_audit. Если ответ grounded — двигаемся к Agent Registry.`
   ].join("\n");
 }
 
@@ -214,7 +215,7 @@ async function enableAlive(env, chatId) {
   brain.alive_mode = "growth";
   brain.alive_updated_at = new Date().toISOString();
   await saveBrain(env, brain);
-  await send(env, chatId, "Alive Growth включён. Теперь это реальный флаг в KV, а не просто ответ модели. Я буду делать редкий self-audit по cron без спама.");
+  await send(env, chatId, "Alive Growth включён. Теперь это реальный флаг в KV. Автотик будет редким и grounded: без выдуманных файлов и без auto-apply.");
 }
 
 async function disableAlive(env, chatId) {
@@ -223,6 +224,16 @@ async function disableAlive(env, chatId) {
   brain.alive_updated_at = new Date().toISOString();
   await saveBrain(env, brain);
   await send(env, chatId, "Alive выключен.");
+}
+
+async function aliveTick(env) {
+  const level = await levelText(env);
+  return [
+    "Alive Growth tick:",
+    level,
+    "",
+    "Автовывод: я не пишу код сама и не выдумываю файлы. Следующий безопасный шаг — очистить задачи и сделать grounded /self_audit."
+  ].join("\n");
 }
 
 export default {
@@ -236,10 +247,11 @@ export default {
         d.selfcheck_wrapper = VERSION;
         d.format_answer_hotfix = true;
         d.alive_growth = true;
+        d.grounded_alive = true;
         d.level_command = true;
         d.auto_interval_minutes = AUTO_INTERVAL_MS / 60000;
       }
-      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, level_command: true }, r.status);
+      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, grounded_alive: true, level_command: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
@@ -281,7 +293,6 @@ export default {
     const ms = Date.now();
     if (last && ms - last < AUTO_INTERVAL_MS) return;
     await env.MINISKYNET_KV.put("runtime:last_alive_growth_ms", String(ms));
-    const answer = await askAudit(env);
-    await send(env, brain.owner_chat_id, "Alive Growth tick:\n" + answer);
+    await send(env, brain.owner_chat_id, await aliveTick(env));
   }
 };
