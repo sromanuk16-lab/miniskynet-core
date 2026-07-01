@@ -1,6 +1,6 @@
 import agentsWorker from "./worker-agents.js";
 
-const VERSION = "codemap-v1";
+const VERSION = "codemap-v2-inspector-aware";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -59,13 +59,19 @@ function files() {
       role: "реестр агентов и read-only agent runner",
       commands: ["/agents", "/agent <id> <task>"],
       risks: ["не дать агентам права менять код", "не выдумывать файлы", "не усложнить роутер"],
-      check: "/agents и /agent critic тест"
+      check: "/agents и /agent coder тест"
     },
     "cloudflare/src/worker-codemap.js": {
       role: "карта собственного кода и роли файлов",
       commands: ["/code_map", "/file_role <file>"],
       risks: ["карта может устареть после новых wrapper-файлов"],
       check: "/code_map"
+    },
+    "cloudflare/src/worker-inspector.js": {
+      role: "self-inspection, dynamic next module, фильтр команд и защита от повторов",
+      commands: ["/inspect_self", "/next_module"],
+      risks: ["не позволять модели придумывать несуществующие команды", "не застревать на одном шаге", "не принимать путь .js как Telegram-команду"],
+      check: "/inspect_self затем /next_module"
     },
     "cloudflare/wrangler.toml": {
       role: "точка входа Cloudflare Worker, KV binding, env vars, cron",
@@ -88,10 +94,10 @@ function shortName(s) {
 function renderMap() {
   const map = files();
   return [
-    "Code Map v1:",
+    "Code Map v2:",
     ...Object.entries(map).map(([path, info]) => `${path} — ${info.role}`),
     "",
-    "Команда: /file_role worker-agents.js"
+    "Команда: /file_role worker-inspector.js"
   ].join("\n");
 }
 
