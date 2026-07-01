@@ -1,6 +1,6 @@
 import coreWorker from "./worker-v1.js";
 
-const VERSION = "selfcheck-v6-auto-audit";
+const VERSION = "selfcheck-v7-memory-task-bridge";
 const AUTO_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -45,7 +45,7 @@ async function getMemories(env) {
 }
 
 async function getGrowth(env) {
-  return await kvGet(env, "growth_state", { stage: "core_stability", target: "безопасно писать и использовать агентов как код", last_audit_at: null });
+  return await kvGet(env, "growth_state", { stage: "core_stability", target: "связать память, задачи и авто-аудит", last_audit_at: null });
 }
 
 async function saveBrain(env, brain) {
@@ -126,7 +126,7 @@ function auditPrompt() {
     "Нужно найти один реальный следующий инженерный шаг. Не пиши код. Не утверждай, что что-то уже изменено.",
     "Верни JSON. Поле answer должно содержать эти пункты:",
     "Уровень, Слабость, Файл, Цель, Новая логика, Риск, Проверка.",
-    "Файл должен быть только из списка выше. Проверка должна быть Telegram-командой."
+    "Файл должен быть только из списка выше. Проверка должна быть реальной Telegram-командой."
   ].join("\n");
 }
 
@@ -153,6 +153,154 @@ async function askAudit(env) {
   return formatAnswer(parsed, raw) + `\n\nusage: in=${data?.usage?.prompt_tokens || "?"} out=${data?.usage?.completion_tokens || "?"}`;
 }
 
+function firstField(text, names) {
+  const lines = String(text || "").split(/\n+/).map(x => x.trim()).filter(Boolean);
+  for (const line of lines) {
+    for (const name of names) {
+      const rx = new RegExp("^" + name + "\\s*[:：-]\\s*(.+)$", "i");
+      const m = line.match(rx);
+      if (m) return m[1].trim();
+    }
+  }
+  return "";
+}
+
+function normalizeAudit(text) {
+  const raw = String(text || "").replace(/```/g, "").trim();
+  return {
+    level: firstField(raw, ["Уровень", "level"]),
+    weakness: firstField(raw, ["Слабость", "weakness"]),
+    file: firstField(raw, ["Файл", "file"]),
+    target: firstField(raw, ["Цель", "target"]),
+    new_logic: firstField(raw, ["Новая логика", "new_logic", "new logic"]),
+    risk: firstField(raw, ["Риск", "risk"]),
+    check: firstField(raw, ["Проверка", "check"]),
+    raw: raw.slice(0, 1800)
+  };
+}
+
+function isUsefulAudit(a) {
+  if (!a) return false;
+  if (!a.file || !a.weakness) return false;
+  if (!a.check || !a.check.includes("/")) return false;
+  if (!a.file.includes("cloudflare/") && !a.file.includes("wrangler.toml")) return false;
+  return true;
+}
+
+function auditKey(a) {
+  return [a.file, a.target || "target", a.weakness].join("|").toLowerCase().slice(0, 420);
+}
+
+async function bridgeAuditToMemoryAndTasks(env, source, auditText) {
+  const a = normalizeAudit(auditText);
+  const useful = isUsefulAudit(a);
+  const now = new Date().toISOString();
+  const key = auditKey(a);
+  const result = { useful, memory_added: false, task_added: false, key, audit: a };
+
+  await kvPut(env, "last_audit_structured", { version: VERSION, source, useful, audit: a, updated_at: now });
+  if (!useful) return result;
+
+  const memData = await kvGet(env, "memories", { memories: [] });
+  const memories = Array.isArray(memData.memories) ? memData.memories : [];
+  const memExists = memories.some(m => (m.key || "") === key || String(m.lesson || "").includes(a.weakness));
+  if (!memExists) {
+    memories.push({
+      id: "mem_" + Date.now(),
+      key,
+      type: "engineering_lesson",
+      status: "active",
+      source,
+      file: a.file,
+      lesson: a.weakness,
+      action: a.new_logic || a.target || "уточнить новую логику",
+      check: a.check,
+      risk: a.risk,
+      created_at: now
+    });
+    await kvPut(env, "memories", { ...memData, memories: memories.slice(-120), updated_at: now });
+    result.memory_added = true;
+  }
+
+  const taskData = await kvGet(env, "tasks", { tasks: [] });
+  const tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
+  const taskExists = tasks.some(t => (t.key || "") === key && t.status !== "done" && t.status !== "archived");
+  if (!taskExists) {
+    tasks.push({
+      id: "task_" + Date.now(),
+      key,
+      type: "core",
+      status: "active",
+      source,
+      title: `${a.file}: ${a.weakness}`.slice(0, 240),
+      file: a.file,
+      target: a.target,
+      new_logic: a.new_logic,
+      risk: a.risk,
+      check: a.check,
+      created_at: now,
+      updated_at: now
+    });
+    await kvPut(env, "tasks", { ...taskData, tasks: tasks.slice(-160), updated_at: now });
+    result.task_added = true;
+  }
+
+  const growth = await getGrowth(env);
+  await kvPut(env, "growth_state", {
+    ...growth,
+    stage: "audit_to_task_bridge",
+    last_audit_at: now,
+    last_audit_key: key,
+    last_audit_file: a.file,
+    updated_at: now
+  });
+
+  return result;
+}
+
+function bridgeText(r) {
+  if (!r?.useful) return "Bridge: аудит не записан в задачи — не хватает файла/слабости/реальной команды проверки.";
+  return [
+    "Bridge:",
+    `Память: ${r.memory_added ? "добавлена" : "уже была"}`,
+    `Задача: ${r.task_added ? "создана" : "уже была"}`,
+    `Файл: ${r.audit.file}`,
+    `Проверка: ${r.audit.check}`
+  ].join("\n");
+}
+
+async function showGrowthQueue(env, chatId) {
+  const tasks = await getTasks(env);
+  const active = tasks.filter(t => t.status !== "archived" && t.status !== "done").slice(-8).reverse();
+  if (!active.length) {
+    await send(env, chatId, "Growth Queue пустая. Запусти /self_audit или дождись alive tick.");
+    return;
+  }
+  await send(env, chatId, [
+    "Growth Queue:",
+    ...active.map((t, i) => `${i + 1}. ${t.title || t.file || "task"}\nФайл: ${t.file || "?"}\nПроверка: ${t.check || "?"}`)
+  ].join("\n\n"));
+}
+
+async function showLastAutoAudit(env, chatId) {
+  const last = await kvGet(env, "last_audit_structured", null);
+  if (!last?.audit) {
+    await send(env, chatId, "Last Auto Audit пока пуст. Запусти /self_audit или дождись alive tick.");
+    return;
+  }
+  await send(env, chatId, [
+    "Last Audit:",
+    `Источник: ${last.source || "unknown"}`,
+    `Файл: ${last.audit.file || "?"}`,
+    `Слабость: ${last.audit.weakness || "?"}`,
+    `Цель: ${last.audit.target || "?"}`,
+    `Новая логика: ${last.audit.new_logic || "?"}`,
+    `Риск: ${last.audit.risk || "?"}`,
+    `Проверка: ${last.audit.check || "?"}`,
+    `Useful: ${last.useful ? "yes" : "no"}`
+  ].join("\n"));
+}
+
 function dayStats(brain) {
   const key = new Date().toISOString().slice(0, 10);
   return brain.stats?.daily?.[key] || { cycles: 0, input_tokens: 0, output_tokens: 0, cost_usd: 0 };
@@ -175,16 +323,18 @@ function detectLevel(brain, tasks, memories, growth) {
   if (brain.stats?.cycles_total > 0) score += 0.3;
   if (mem >= 5) score += 0.3;
   if (core >= 1) score += 0.2;
-  if (growth?.last_audit_at) score += 0.3;
+  if (growth?.last_audit_at) score += 0.5;
+  if (growth?.stage === "audit_to_task_bridge") score += 0.4;
   if (alive) score += 0.2;
-  if (active > 40) score -= 0.2;
-  return Math.max(1, Math.min(2.8, Number(score.toFixed(1))));
+  if (active > 60) score -= 0.2;
+  return Math.max(1, Math.min(3.4, Number(score.toFixed(1))));
 }
 
 function levelName(score) {
   if (score < 1.5) return "Level 1 — Clean Core";
   if (score < 2.0) return "Level 1.5 — Clean Core + ранний self-audit";
-  return "Level 2 — Memory/Task Hygiene + Auto Audit";
+  if (score < 3.0) return "Level 2 — Memory/Task Hygiene + Auto Audit";
+  return "Level 3 — Audit → Memory → Task Bridge";
 }
 
 async function levelText(env) {
@@ -197,23 +347,24 @@ async function levelText(env) {
   const active = countActiveTasks(tasks);
   const core = countCoreTasks(tasks);
   const broken = [];
-  if (active > 40) broken.push("очередь задач раздута");
-  if (memories.length > 20) broken.push("память уже шумная");
-  if (!growth?.last_audit_at) broken.push("self-audit ещё не закреплён");
+  if (active > 60) broken.push("очередь задач раздута");
+  if (memories.length > 30) broken.push("память шумная, нужна гигиена");
+  if (!growth?.last_audit_at) broken.push("auto-audit ещё не закреплён в задачах");
   if (brain.alive_enabled !== true) broken.push("alive выключен");
-  if (!broken.length) broken.push("критичных блокеров не вижу");
+  if (!broken.length) broken.push("главный блокер — нет применения кода");
   return [
     `Уровень: ${score}/10`,
     `Стадия: ${levelName(score)}`,
     `Думает: по запросу, /self_audit или alive tick; alive tick теперь делает auto audit.`,
     `Обучается: памятью, задачами, картой кода и инженерными спецификациями.`,
+    `Bridge: auto-audit записывает полезный вывод в память и создаёт active task.`,
     `Alive: ${brain.alive_enabled === true ? "true" : "false"}`,
     `Циклы: всего ${brain.stats?.cycles_total || 0}, сегодня ${st.cycles || 0}`,
     `Память: ${memories.length}`,
     `Задачи: всего ${tasks.length}, активных ${active}, core ${core}`,
     `Growth stage: ${growth.stage || "unknown"}`,
     `Сломано/слабо: ${broken.join("; ")}`,
-    `Следующий шаг: дождаться alive tick или вызвать /self_audit; затем проверять точность через /agent tester.`
+    `Следующий шаг: /self_audit → /growth_queue → /agent tester проверить последнюю задачу.`
   ].join("\n");
 }
 
@@ -224,7 +375,7 @@ async function enableAlive(env, chatId) {
   brain.alive_mode = "growth";
   brain.alive_updated_at = new Date().toISOString();
   await saveBrain(env, brain);
-  await send(env, chatId, "Alive Growth включён. Теперь раз в 30 минут будет автоматический grounded audit: файл, цель, новая логика, риск, проверка.");
+  await send(env, chatId, "Alive Growth включён. Раз в 30 минут будет auto audit, запись в память и создание задачи.");
 }
 
 async function disableAlive(env, chatId) {
@@ -238,7 +389,8 @@ async function disableAlive(env, chatId) {
 async function aliveTick(env) {
   const level = await levelText(env);
   const audit = await askAudit(env);
-  await kvPut(env, "last_auto_audit", { version: VERSION, level, audit, updated_at: new Date().toISOString() });
+  const bridge = await bridgeAuditToMemoryAndTasks(env, "alive_tick", audit);
+  await kvPut(env, "last_auto_audit", { version: VERSION, level, audit, bridge, updated_at: new Date().toISOString() });
   return [
     "Alive Growth tick:",
     level,
@@ -246,7 +398,9 @@ async function aliveTick(env) {
     "Auto Audit:",
     audit,
     "",
-    "Статус: найдено автоматически, без ручного запроса. Код не менялся."
+    bridgeText(bridge),
+    "",
+    "Статус: найдено автоматически, записано в память/задачи, код не менялся."
   ].join("\n");
 }
 
@@ -264,9 +418,11 @@ export default {
         d.grounded_alive = true;
         d.level_command = true;
         d.auto_audit = true;
+        d.memory_task_bridge = true;
+        d.commands = ["/level", "/self_audit", "/last_auto_audit", "/growth_queue", "/alive_on", "/alive_off"];
         d.auto_interval_minutes = AUTO_INTERVAL_MS / 60000;
       }
-      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, grounded_alive: true, level_command: true, auto_audit: true }, r.status);
+      return json(d || { ok: true, selfcheck_wrapper: VERSION, alive_growth: true, memory_task_bridge: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
@@ -277,6 +433,16 @@ export default {
       if (m && (text === "/level" || text === "уровень" || text === "какой уровень" || text === "на каком уровне")) {
         await send(env, m.chat.id, await levelText(env));
         return json({ ok: true, handled_by: VERSION, level: true });
+      }
+
+      if (m && (text === "/last_auto_audit" || text === "последний аудит")) {
+        await showLastAutoAudit(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, last_auto_audit: true });
+      }
+
+      if (m && (text === "/growth_queue" || text === "очередь роста")) {
+        await showGrowthQueue(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, growth_queue: true });
       }
 
       if (m && (text === "/alive_on" || text === "включи alive" || text === "включи самообучение" || text === "включи автообучение" || text === "живой режим")) {
@@ -292,8 +458,9 @@ export default {
       if (m && (text === "/self_audit" || text === "/grow_one" || text === "самоаудит" || text === "проверь себя")) {
         await send(env, m.chat.id, "Думаю...");
         const answer = await askAudit(env);
-        await send(env, m.chat.id, answer);
-        return json({ ok: true, handled_by: VERSION });
+        const bridge = await bridgeAuditToMemoryAndTasks(env, "manual_audit", answer);
+        await send(env, m.chat.id, answer + "\n\n" + bridgeText(bridge));
+        return json({ ok: true, handled_by: VERSION, bridge });
       }
     }
 
