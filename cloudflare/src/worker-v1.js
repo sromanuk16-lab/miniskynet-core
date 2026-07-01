@@ -1,4 +1,4 @@
-const VERSION = "clean-core-v1.0";
+const VERSION = "clean-core-v1.1-growth";
 const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
 const THINK_LOCK_TTL = 120;
 
@@ -73,6 +73,20 @@ async function saveTasks(env, list) {
   await kvPut(env, "tasks", { tasks: list.slice(-120) });
 }
 
+async function getGrowth(env) {
+  return await kvGet(env, "growth_state", {
+    target: "дойти до способности безопасно писать и использовать агентов как код",
+    stage: "core_stability",
+    rule: "MiniSkynet растёт маленькими проверяемыми шагами; без auto-apply и без бесконечных циклов.",
+    last_audit_at: null
+  });
+}
+
+async function saveGrowth(env, state) {
+  state.updated_at = now();
+  await kvPut(env, "growth_state", state);
+}
+
 async function tg(env, method, payload) {
   const res = await fetch(`https://api.telegram.org/bot${env.TELEGRAM_BOT_TOKEN}/${method}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(payload) });
   const data = await res.json().catch(() => ({}));
@@ -96,7 +110,7 @@ function norm(s) { return String(s || "").toLowerCase().replace(/\s+/g, " ").tri
 function taskType(title) {
   const t = norm(title);
   if (/f-22|raptor|раптор/.test(t)) return "research";
-  if (/worker|код|github|патч|self-update|execution|lock|router|clean core|ядр|памят|задач|alive|стиль|самоаудит|самосоверш/.test(t)) return "core";
+  if (/agent registry|агент|worker|код|github|патч|self-update|execution|lock|router|clean core|ядр|памят|задач|alive|стиль|самоаудит|самосоверш|growth|рост/.test(t)) return "core";
   if (/проверить работоспособность|тестирование системы|безопасность данных/.test(t)) return "system";
   if (/оптимизировать процессы|собрать данные|обновить статус|мониторинг|актуальность информации|уточнить детали|характеристик/.test(t)) return "junk";
   return "user";
@@ -119,6 +133,47 @@ function seedCoreTasks() {
     makeTask("Сделать Self-Audit: команда проверяет слабые места ядра и предлагает один безопасный следующий шаг.", "core", 4),
     makeTask("Подготовить Self-Update Proposal: MiniSkynet предлагает патч, но применяет только после approve Сергея.", "core", 4)
   ];
+}
+
+function seedGrowthTasks() {
+  return [
+    makeTask("Growth Step 1: проверить Clean Core v1 через /status, /tasks_hygiene, /tasks_seed_core и один обычный вопрос.", "core", 5),
+    makeTask("Growth Step 2: сделать Self-Audit, где MiniSkynet сама называет слабость ядра и один следующий безопасный шаг.", "core", 5),
+    makeTask("Growth Step 3: спроектировать Agent Registry как данные: роли, права, запреты, вход и выход каждого агента.", "core", 4),
+    makeTask("Growth Step 4: подготовить Self-Update Proposal для Agent Registry, без применения кода до approve Сергея.", "core", 4),
+    makeTask("Growth Step 5: после approve научиться создавать простых агентов как код и использовать их через единый router.", "core", 4)
+  ];
+}
+
+function growthPlanText() {
+  return [
+    "Путь роста MiniSkynet:",
+    "1. Clean Core — не ломаться, один запрос = один вызов модели.",
+    "2. Self-Audit — сама честно ищет слабое место.",
+    "3. Agent Registry — сначала агенты как данные и правила.",
+    "4. Self-Update Proposal — сама предлагает патч, но не применяет.",
+    "5. Approve/Apply — применяет код только после approve Сергея.",
+    "6. Agents as Code — пишет маленькие агент-файлы и подключает их через router.",
+    "7. Project Workbench — только потом получает проекты Сергея и доводит их маленькими патчами."
+  ].join("\n");
+}
+
+function growthAuditPrompt(growth, tasks, memories) {
+  const active = tasks.filter(t => t.status === "todo" && t.type === "core").slice(0, 8).map(t => ({ title: t.title, priority: t.priority }));
+  const mem = memories.slice(-6).map(m => ({ lesson: m.lesson, action: m.action, status: m.status, score: m.score }));
+  return [
+    "Ты MiniSkynet Core. Твоя цель — вырасти до системы, которая сможет безопасно писать и использовать агентов как код.",
+    "Но ты должна дойти до этого сама, по лестнице зрелости, без прыжка в хаос.",
+    "Сейчас нельзя auto-apply. Нельзя создавать бесконечный цикл. Нельзя делать внешние проекты Сергея.",
+    "Сделай self-audit: оцени текущий уровень, главную слабость и один ближайший шаг роста.",
+    "Не предлагай сразу писать агентов как код, если Clean Core, Task Hygiene и Self-Audit ещё не закреплены.",
+    "Верни JSON: answer, memory_artifact, next_tasks.",
+    "answer: коротко, живо, на русском, как маленькая Лондон.",
+    "next_tasks: максимум 2 конкретные core-задачи с критерием результата.",
+    `growth_state=${JSON.stringify(growth)}`,
+    `active_tasks=${JSON.stringify(active)}`,
+    `recent_memory=${JSON.stringify(mem)}`
+  ].join("\n");
 }
 
 function hygieneTasks(list) {
@@ -176,6 +231,7 @@ function promptFor(text, memories, tasks) {
     "Текущий фокус: самосовершенствование ядра, а не внешние проекты, пока Сергей сам не попросит.",
     "Стиль: живо, коротко, тепло, на ты, без офисных фраз и без притворства сознанием.",
     "Правило исполнения: один ответ = один полезный шаг. Не создавай общие задачи вроде 'оптимизировать процессы' или 'собрать данные'.",
+    "Дальний путь: сначала стабильность и self-audit, потом Agent Registry, потом self-update proposal, потом агенты как код после approve.",
     "Разделяй: core_task — развитие MiniSkynet; research_task — разовый вопрос Сергея, не цель развития.",
     "Верни строго JSON без markdown: answer, memory_artifact, next_tasks.",
     "next_tasks максимум 2; только конкретные core-задачи с критерием результата.",
@@ -213,7 +269,7 @@ async function askModel(env, brain, prompt) {
   return { content, input, output };
 }
 
-async function think(env, chatId, text) {
+async function think(env, chatId, text, directPrompt = false) {
   if (await locked(env)) { await send(env, chatId, "Серёга, я уже думаю над прошлым запросом. Второй запуск не делаю."); return; }
   const miss = missing(env);
   if (miss.length) { await send(env, chatId, "Не могу думать: не хватает " + miss.join(", ")); return; }
@@ -225,7 +281,7 @@ async function think(env, chatId, text) {
     const allTasks = await getTasks(env);
     const clean = hygieneTasks(allTasks);
     if (clean.archived) await saveTasks(env, clean.tasks);
-    const prompt = promptFor(text, mem, clean.tasks);
+    const prompt = directPrompt ? String(text || "") : promptFor(text, mem, clean.tasks);
     const r = await askModel(env, b, prompt);
     const parsed = parseLoose(r.content) || {};
     const answer = String(parsed.answer || r.content || "Я подумала, но ответ пустой.").slice(0, 1200);
@@ -248,6 +304,17 @@ async function think(env, chatId, text) {
   }
 }
 
+async function runSelfAudit(env, chatId) {
+  const growth = await getGrowth(env);
+  growth.last_audit_at = now();
+  await saveGrowth(env, growth);
+  const mem = await getMem(env);
+  const allTasks = await getTasks(env);
+  const clean = hygieneTasks(allTasks);
+  if (clean.archived) await saveTasks(env, clean.tasks);
+  await think(env, chatId, growthAuditPrompt(growth, clean.tasks, mem), true);
+}
+
 async function handleCommand(env, chatId, userId, text) {
   if (!allowed(env, userId)) { await send(env, chatId, "Доступ закрыт."); return; }
   const raw = String(text || "").trim();
@@ -256,12 +323,17 @@ async function handleCommand(env, chatId, userId, text) {
 
   if (raw === "/start" || low === "старт") {
     b.owner_chat_id = String(chatId); b.alive_enabled = false; await saveBrain(env, b);
-    await send(env, chatId, `MiniSkynet Clean Core v1 запущена. Я снова могу думать, но строго по одному запросу. Команды: /status /memory /tasks /tasks_hygiene /tasks_clear /tasks_seed_core /cost /alive_off`); return;
+    await send(env, chatId, `MiniSkynet Clean Core v1.1 Growth запущена. Я расту маленькими безопасными шагами. Команды: /status /growth_plan /growth_seed /self_audit /tasks /tasks_hygiene /cost /alive_off`); return;
   }
   if (raw === "/status" || /^(статус|ты тут|жива|живой|ping|пинг)$/.test(low)) {
-    const mem = await getMem(env); const tasks = await getTasks(env); const st = dayStats(b);
-    await send(env, chatId, `Status\nversion: ${VERSION}\nalive: ${b.alive_enabled === true}\nmodel_calls: enabled\ncycles: ${b.stats?.cycles_total || 0}\ntoday_cycles: ${st.cycles || 0}\ntasks: ${tasks.length}\nmemories: ${mem.length}`); return;
+    const mem = await getMem(env); const tasks = await getTasks(env); const st = dayStats(b); const growth = await getGrowth(env);
+    await send(env, chatId, `Status\nversion: ${VERSION}\nalive: ${b.alive_enabled === true}\nmodel_calls: enabled\ngrowth_stage: ${growth.stage}\ncycles: ${b.stats?.cycles_total || 0}\ntoday_cycles: ${st.cycles || 0}\ntasks: ${tasks.length}\nmemories: ${mem.length}`); return;
   }
+  if (raw === "/growth_plan" || /^(план роста|путь роста|как расти)$/.test(low)) { await send(env, chatId, growthPlanText()); return; }
+  if (raw === "/growth_state" || /^(состояние роста|growth state)$/.test(low)) { const g = await getGrowth(env); await send(env, chatId, `Growth state\nstage: ${g.stage}\ntarget: ${g.target}\nrule: ${g.rule}\nlast_audit_at: ${g.last_audit_at || "нет"}`); return; }
+  if (raw === "/growth_seed" || /^(засей рост|запусти рост|старт роста)$/.test(low)) { const t = seedGrowthTasks(); await saveTasks(env, t); const g = await getGrowth(env); g.stage = "core_stability"; await saveGrowth(env, g); await send(env, chatId, `Засеяла лестницу роста: ${t.length} задач. Фокус: сначала Clean Core и Self-Audit, потом Agent Registry, потом агенты как код.`); return; }
+  if (raw === "/self_audit" || raw === "/grow_one" || /^(проверь себя|сделай шаг роста|самоаудит)$/.test(low)) { await runSelfAudit(env, chatId); return; }
+  if (raw === "/agents" || /^(агенты|agent registry|реестр агентов)$/.test(low)) { await send(env, chatId, "Agent Registry пока не включён как код. Правильный путь: 1) Self-Audit, 2) Agent Registry как данные, 3) proposal патча, 4) approve, 5) agents as code. Я не прыгаю сразу в код, чтобы снова не сломаться."); return; }
   if (raw === "/alive_off" || /^(стоп|stop|выключи alive|выключи авто|авто лай стоп)$/.test(low)) { b.alive_enabled = false; await saveBrain(env, b); await send(env, chatId, "Alive выключен. Автоциклы не запускаю."); return; }
   if (raw === "/cost" || /^(расход|токены|cost)$/.test(low)) { const st = dayStats(b); await send(env, chatId, `Сегодня\ncycles: ${st.cycles || 0}\ninput: ${st.input_tokens || 0}\noutput: ${st.output_tokens || 0}\ncost: $${Number(st.cost_usd || 0).toFixed(6)}`); return; }
   if (raw === "/memory" || /^(память|глянь память|покажи память|что по памяти)$/.test(low)) { const mem = (await getMem(env)).slice(-8).reverse(); await send(env, chatId, mem.length ? mem.map((m,i)=>`${i+1}. [${m.status}/${m.score}] ${String(m.lesson||m.signal).slice(0,180)} -> ${String(m.action||"").slice(0,130)}`).join("\n") : "Память пустая."); return; }
@@ -284,7 +356,7 @@ export default {
   async fetch(request, env) {
     await hydrate(env);
     const url = new URL(request.url);
-    if (url.pathname === "/") return json({ ok: true, service: "MiniSkynet", version: VERSION, clean_core: true, wrappers: "removed", scheduled_alive: "off", missing: missing(env) });
+    if (url.pathname === "/") return json({ ok: true, service: "MiniSkynet", version: VERSION, clean_core: true, growth_core: true, wrappers: "removed", scheduled_alive: "off", missing: missing(env) });
     if (url.pathname === "/setup-webhook") return await setupWebhook(env, request);
     if (url.pathname === "/telegram" && request.method === "POST") {
       const update = await request.json().catch(() => null);
