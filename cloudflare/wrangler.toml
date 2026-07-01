@@ -1,20 +1,11 @@
 name = "miniskynet-core"
-main = "src/worker-style.js"
+main = "src/worker-focus.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
 [[kv_namespaces]]
 binding = "MINISKYNET_KV"
 id = "9d30973078944abea016a7e533a4bc88"
-
-[vars]
-OPENROUTER_MODEL_CHEAP = "openai/gpt-4o-mini"
-OPENROUTER_MODEL_CODING = "openai/gpt-4o-mini"
-MAX_DAILY_COST_USD = "0.50"
-MAX_CYCLES_PER_DAY = "20"
-MAX_OUTPUT_TOKENS = "800"
-ALIVE_ENABLED = "false"
-ALIVE_OWNER_CHAT_ID = ""
 
 [triggers]
 crons = ["*/10 * * * *"]
