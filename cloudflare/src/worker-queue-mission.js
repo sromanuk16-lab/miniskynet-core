@@ -1,6 +1,6 @@
 import inspectorWorker from "./worker-inspector.js";
 
-const VERSION = "queue-mission-v1";
+const VERSION = "queue-mission-v2-action-card";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -135,6 +135,123 @@ async function queueToMission(env, chatId) {
   ].join("\n"));
 }
 
+function makeActionCard(review) {
+  if (!review || review.status !== "yes" || !filesOk().includes(review.file)) return null;
+  return {
+    id: "action_" + Date.now(),
+    version: VERSION,
+    status: "ready",
+    review_id: review.id,
+    mission_id: review.mission_id,
+    mission_goal: review.mission_goal,
+    file: review.file,
+    target: review.target,
+    requested_effect: review.new_logic,
+    check: review.check,
+    expected: review.expected,
+    risk_level: review.risk_level,
+    note: "Карточка следующего шага. Файл этим шагом не меняется.",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString()
+  };
+}
+
+function renderActionCard(a) {
+  if (!a) return "Action Card: пока пусто. Сначала /review_yes.";
+  return [
+    "Action Card:",
+    `ID: ${a.id}`,
+    `Статус: ${a.status}`,
+    `Миссия: ${a.mission_goal}`,
+    `Файл: ${a.file}`,
+    `Цель: ${a.target}`,
+    `Что должно измениться: ${a.requested_effect}`,
+    `Проверка: ${a.check}`,
+    `Ожидание: ${a.expected}`,
+    `Риск: ${a.risk_level}`,
+    "Ограничение: файл пока не меняется.",
+    "Команды: /action_yes или /action_no"
+  ].join("\n");
+}
+
+async function showActionCard(env, chatId) {
+  let a = await kvGet(env, "action_card", null);
+  if (!a || a.status === "no") {
+    const r = await kvGet(env, "review_card", null);
+    if (!r || r.status !== "yes") {
+      await send(env, chatId, "Action Card: сначала нужна подтверждённая review card. Команда: /review_card затем /review_yes");
+      return;
+    }
+    a = makeActionCard(r);
+    if (!a) {
+      await send(env, chatId, "Action Card: не могу собрать карточку. Проверь /review_card.");
+      return;
+    }
+    await kvPut(env, "action_card", a);
+  }
+  await send(env, chatId, renderActionCard(a));
+}
+
+async function actionYes(env, chatId) {
+  const a = await kvGet(env, "action_card", null);
+  if (!a || a.status !== "ready") {
+    await send(env, chatId, "Action Yes: нет action card в статусе ready. Команда: /action_card");
+    return;
+  }
+  const now = new Date().toISOString();
+  const yes = { ...a, status: "yes", yes_at: now, updated_at: now };
+  await kvPut(env, "action_card", yes);
+
+  const m = await kvGet(env, "active_mission", null);
+  if (m?.id === a.mission_id) {
+    const updated = {
+      ...m,
+      status: "action_yes",
+      current_step: "action_yes",
+      next_command: "/mission_log",
+      updated_at: now,
+      events: [...(m.events || []), event("action_yes", "Сергей подтвердил action card. Следующий слой: file operation.")]
+    };
+    await kvPut(env, "active_mission", updated);
+    await kvPut(env, "mission:" + m.id, updated);
+  }
+
+  await send(env, chatId, [
+    "Action Yes готово.",
+    "✅ Action card подтверждена.",
+    `Файл: ${yes.file}`,
+    `Проверка: ${yes.check}`,
+    "Файл пока не менялся.",
+    "Следующий слой: file operation."
+  ].join("\n"));
+}
+
+async function actionNo(env, chatId) {
+  const a = await kvGet(env, "action_card", null);
+  if (!a) {
+    await send(env, chatId, "Action No: action card пустая.");
+    return;
+  }
+  const now = new Date().toISOString();
+  await kvPut(env, "action_card", { ...a, status: "no", no_at: now, updated_at: now });
+
+  const m = await kvGet(env, "active_mission", null);
+  if (m?.id === a.mission_id) {
+    const updated = {
+      ...m,
+      status: "action_no",
+      current_step: "action_no",
+      next_command: "/mission_log",
+      updated_at: now,
+      events: [...(m.events || []), event("action_no", "Сергей отклонил action card.")]
+    };
+    await kvPut(env, "active_mission", updated);
+    await kvPut(env, "mission:" + m.id, updated);
+  }
+
+  await send(env, chatId, "Action No готово. Action card отклонена.");
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -144,7 +261,7 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.queue_mission_wrapper = VERSION;
-        d.commands = [...new Set([...(d.commands || []), "/growth_to_mission"])]
+        d.commands = [...new Set([...(d.commands || []), "/growth_to_mission", "/action_card", "/action_yes", "/action_no"])]
       }
       return json(d || { ok: true, queue_mission_wrapper: VERSION }, r.status);
     }
@@ -153,6 +270,18 @@ export default {
       const u = await request.clone().json().catch(() => null);
       const m = getMsg(u);
       const low = String(m?.text || "").trim().toLowerCase();
+      if (m && (low === "/action_card" || low === "action card" || low === "карточка действия")) {
+        await showActionCard(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, action_card: true });
+      }
+      if (m && (low === "/action_yes" || low === "action yes" || low === "да действию")) {
+        await actionYes(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, action_yes: true });
+      }
+      if (m && (low === "/action_no" || low === "action no" || low === "нет действию")) {
+        await actionNo(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, action_no: true });
+      }
       if (m && (low === "/growth_to_mission" || low === "задачу роста в миссию")) {
         await queueToMission(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, growth_to_mission: true });
