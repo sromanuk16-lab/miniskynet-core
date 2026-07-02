@@ -1,0 +1,13 @@
+[
+  {
+    "time": "2026-07-02T11:26:06.311Z",
+    "version": "proof-stage-v1",
+    "mission_id": "mission_1782983032337",
+    "planned_file": "cloudflare/src/worker-inspector.js",
+    "target": "mission pipeline",
+    "requested_effect": "mission_step двигает миссию через planner/coder/tester/security pipeline",
+    "check": "/mission_run затем /mission_log",
+    "risk_level": "low",
+    "note": "controlled repository state proof"
+  }
+]
