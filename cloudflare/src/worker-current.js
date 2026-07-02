@@ -1,4 +1,4 @@
-import appWorker from "./worker-alive-sync.js";
+import appWorker from "./worker-review-adapter.js";
 
 export default {
   async fetch(request, env, ctx) {
