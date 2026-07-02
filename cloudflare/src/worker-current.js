@@ -1,4 +1,4 @@
-import appWorker from "./worker-alive-dialog.js";
+import appWorker from "./worker-dialog-confirm.js";
 
 export default {
   async fetch(request, env, ctx) {
