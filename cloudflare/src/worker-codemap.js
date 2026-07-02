@@ -1,6 +1,6 @@
 import agentsWorker from "./worker-agents.js";
 
-const VERSION = "codemap-v2-inspector-aware";
+const VERSION = "codemap-v3-queue-mission";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -25,6 +25,12 @@ async function send(env, chatId, text) {
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ chat_id: chatId, text: String(text).slice(0, 3900) })
   }).catch(() => null);
+}
+
+async function kvGet(env, key, fallback) {
+  const raw = await env.MINISKYNET_KV.get(key);
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch (_) { return fallback; }
 }
 
 async function kvPut(env, key, value) {
@@ -62,14 +68,14 @@ function files() {
       check: "/agents и /agent coder тест"
     },
     "cloudflare/src/worker-codemap.js": {
-      role: "карта собственного кода и роли файлов",
-      commands: ["/code_map", "/file_role <file>"],
-      risks: ["карта может устареть после новых wrapper-файлов"],
-      check: "/code_map"
+      role: "карта собственного кода, роли файлов, мост queue → mission",
+      commands: ["/code_map", "/file_role <file>", "/growth_to_mission"],
+      risks: ["карта может устареть после новых wrapper-файлов", "не создавать миссию из мусорной задачи"],
+      check: "/code_map затем /growth_to_mission"
     },
     "cloudflare/src/worker-inspector.js": {
-      role: "self-inspection, dynamic next module, фильтр команд и защита от повторов",
-      commands: ["/inspect_self", "/next_module"],
+      role: "self-inspection, mission control, dynamic next module, фильтр команд и защита от повторов",
+      commands: ["/inspect_self", "/next_module", "/mission", "/mission_run", "/mission_log", "/growth_queue"],
       risks: ["не позволять модели придумывать несуществующие команды", "не застревать на одном шаге", "не принимать путь .js как Telegram-команду"],
       check: "/inspect_self затем /next_module"
     },
@@ -80,6 +86,10 @@ function files() {
       check: "root URL показывает активные версии"
     }
   };
+}
+
+function safeFiles() {
+  return Object.keys(files());
 }
 
 function shortName(s) {
@@ -94,7 +104,7 @@ function shortName(s) {
 function renderMap() {
   const map = files();
   return [
-    "Code Map v2:",
+    "Code Map v3:",
     ...Object.entries(map).map(([path, info]) => `${path} — ${info.role}`),
     "",
     "Команда: /file_role worker-inspector.js"
@@ -118,6 +128,86 @@ async function saveCodeMap(env) {
   await kvPut(env, "code_map", { version: VERSION, files: files(), updated_at: new Date().toISOString() });
 }
 
+function commandOk(x) {
+  const c = String(x || "").match(/\/[a-zA-Z_]+/g)?.[0] || "";
+  return new Set([
+    "/level", "/inspect_self", "/next_module", "/code_map", "/agents",
+    "/self_audit", "/memory_hygiene", "/tasks_hygiene", "/growth_queue",
+    "/growth_hygiene", "/growth_done", "/mission_status", "/mission_log", "/mission_run"
+  ]).has(c);
+}
+
+function isQueueItem(t) {
+  const src = String(t?.source || "");
+  const goodSource = src === "manual_audit" || src === "alive_tick" || src === "inspector_auto_scan" || src === "growth_queue" || src === "inspector_structured_audit";
+  return goodSource && t?.status !== "archived" && t?.status !== "done" && safeFiles().includes(String(t.file || "")) && String(t.title || t.new_logic || t.action || "").trim() && commandOk(t.check || "");
+}
+
+function event(type, text, extra = {}) {
+  return { time: new Date().toISOString(), type, status: "done", text, ...extra };
+}
+
+function missionFromTask(task) {
+  const now = new Date().toISOString();
+  const id = "mission_" + Date.now();
+  return {
+    id,
+    version: VERSION,
+    goal: `Queue task: ${task.title || task.new_logic || task.file}`,
+    status: "active",
+    source: "queue_task",
+    source_task_id: task.id,
+    source_task_key: task.key,
+    current_step: "planning_ready",
+    files: [task.file],
+    agents: ["planner", "coder", "tester", "security"],
+    events: [
+      event("mission_started", "Задача из очереди превращена в миссию."),
+      event("queue_task_linked", `Источник: growth_queue. Задача: ${task.title || task.file}`),
+      event("scope_selected", `Рабочий файл: ${task.file}`, { files: [task.file] }),
+      event("planning_ready", "Следующий шаг: /mission_run запустит planner/coder/tester/security pipeline.")
+    ],
+    created_at: now,
+    updated_at: now,
+    next_command: "/mission_run"
+  };
+}
+
+async function queueToMission(env, chatId) {
+  const existing = await kvGet(env, "active_mission", null);
+  if (existing?.status === "active" || existing?.status === "waiting_approve") {
+    await send(env, chatId, "Queue → Mission: уже есть активная миссия. Сначала /mission_log или /cancel_mission.");
+    return;
+  }
+
+  const taskData = await kvGet(env, "tasks", { tasks: [] });
+  const tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
+  const valid = tasks.filter(isQueueItem);
+  if (!valid.length) {
+    await send(env, chatId, "Queue → Mission: нет валидной задачи. Команда: /self_audit затем /growth_queue");
+    return;
+  }
+
+  const task = valid.slice(-1)[0];
+  const mission = missionFromTask(task);
+  const now = new Date().toISOString();
+  const updatedTasks = tasks.map(t => t.id === task.id ? { ...t, status: "done", done_reason: "moved_to_mission", mission_id: mission.id, done_at: now, updated_at: now } : t);
+  await kvPut(env, "tasks", { ...taskData, tasks: updatedTasks, updated_at: now });
+  await kvPut(env, "active_mission", mission);
+  await kvPut(env, "mission:" + mission.id, mission);
+
+  const growth = await kvGet(env, "growth_state", {});
+  await kvPut(env, "growth_state", { ...growth, stage: "queue_to_mission", last_queue_mission_id: mission.id, updated_at: now });
+
+  await send(env, chatId, [
+    "Queue → Mission готово.",
+    "✅ Задача превращена в миссию.",
+    `Цель: ${mission.goal}`,
+    `Файл: ${mission.files.join(", ")}`,
+    "Следующий шаг: /mission_run"
+  ].join("\n"));
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -127,7 +217,7 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.code_map = VERSION;
-        d.code_map_commands = ["/code_map", "/file_role <file>"];
+        d.code_map_commands = ["/code_map", "/file_role <file>", "/growth_to_mission"];
       }
       return json(d || { ok: true, code_map: VERSION }, r.status);
     }
@@ -137,6 +227,11 @@ export default {
       const m = getMsg(u);
       const raw = String(m?.text || "").trim();
       const low = raw.toLowerCase();
+
+      if (m && (low === "/growth_to_mission" || low === "задачу роста в миссию")) {
+        await queueToMission(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, growth_to_mission: true });
+      }
 
       if (m && (low === "/code_map" || low === "карта кода" || low === "code map")) {
         await saveCodeMap(env);
