@@ -1,4 +1,4 @@
-import appWorker from "./worker-github-commit.js";
+import appWorker from "./worker-proof-stage.js";
 
 export default {
   async fetch(request, env, ctx) {
