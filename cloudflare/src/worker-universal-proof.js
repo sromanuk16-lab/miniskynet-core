@@ -1,7 +1,7 @@
 import baseWorker from "./worker-dialog-confirm.js";
 
 const VERSION = "universal-proof-layer-v1";
-const CREATED_AT = "2026-07-02T17:45:21.754Z";
+const CREATED_AT = "2026-07-02T18:40:18.433Z";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
