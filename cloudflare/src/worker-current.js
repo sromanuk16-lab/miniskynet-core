@@ -1,4 +1,4 @@
-import appWorker from "./worker-improvement-runner.js";
+import appWorker from "./worker-universal-proof.js";
 
 export default {
   async fetch(request, env, ctx) {
