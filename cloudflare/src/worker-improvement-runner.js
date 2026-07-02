@@ -123,6 +123,21 @@ function pathAllowed(path, allow = {}) {
   if (prefixes.some(prefix => p.startsWith(prefix))) return true;
   return false;
 }
+function looksLikeSecretContent(content) {
+  const s = String(content || "");
+  const patterns = [
+    /ghp_[A-Za-z0-9_]{30,}/,
+    /github_pat_[A-Za-z0-9_]{30,}/,
+    /sk-[A-Za-z0-9_-]{30,}/,
+    /bot\d+:[A-Za-z0-9_-]{25,}/,
+    /-----BEGIN [A-Z ]*PRIVATE KEY-----/,
+    /Bearer\s+[A-Za-z0-9._-]{40,}/,
+    /(password|пароль)\s*[:=]\s*["'][^"']{8,}["']/i,
+    /(token|secret)\s*[:=]\s*["'][A-Za-z0-9._:-]{20,}["']/i
+  ];
+  return patterns.some(re => re.test(s));
+}
+
 function importPathForWorker(path) {
   const p = cleanPath(path);
   if (!p.startsWith("cloudflare/src/")) return null;
@@ -163,8 +178,8 @@ function validatePatch(patch) {
     if (!["upsert"].includes(action)) errors.push(`action запрещён: ${action}`);
     if (!pathAllowed(path, allow)) errors.push(`path вне allowlist: ${path}`);
     if (content.length > MAX_FILE_CHARS) errors.push(`слишком большой файл: ${path}`);
-    if (/GITHUB_TOKEN|TELEGRAM_BOT_TOKEN|OPENROUTER_API_KEY|SETUP_SECRET|password|пароль/i.test(content)) {
-      errors.push(`похоже на секрет в content: ${path}`);
+    if (looksLikeSecretContent(content)) {
+      errors.push(`похоже на реальный секрет в content: ${path}`);
     }
   }
   if (patch?.switch_entry === true) {
@@ -243,6 +258,7 @@ async function showStatus(env, chatId) {
     "Commands: /improve_status /improve_prepare /improve_review /improve_yes /improve_no /improve_clear"
   ].join("\n"));
 }
+
 async function showReview(env, chatId) {
   const p = await kvGet(env, "improvement_patch", null);
   if (!p) { await send(env, chatId, "Improvement Review: patch пустой. Команда: /improve_prepare"); return; }
@@ -250,6 +266,7 @@ async function showReview(env, chatId) {
   const text = errors.length ? `${patchSummary(p)}\n\nValidation errors:\n- ${errors.join("\n- ")}` : `${patchSummary(p)}\n\nValidation: OK`;
   await send(env, chatId, text);
 }
+
 async function reject(env, chatId) {
   const p = await kvGet(env, "improvement_patch", null);
   if (!p || p.status !== "pending") { await send(env, chatId, "Improve No: pending patch нет."); return; }
@@ -303,11 +320,24 @@ async function accept(env, chatId) {
   await kvPut(env, "improvement_runner_last", done);
   const m = await kvGet(env, "active_mission", null);
   if (m?.id) {
-    const updated = { ...m, status: "improvement_patch_applied", current_step: "improvement_patch_applied", next_command: p.check_command || "/improve_status", updated_at: now(), events: [...(m.events || []), event("improvement_patch_applied", `Improvement patch applied. Files: ${commits.map(x => x.path).join(", ")}`)] };
+    const updated = {
+      ...m,
+      status: "improvement_patch_applied",
+      current_step: "improvement_patch_applied",
+      next_command: p.check_command || "/improve_status",
+      updated_at: now(),
+      events: [...(m.events || []), event("improvement_patch_applied", `Improvement patch applied. Files: ${commits.map(x => x.path).join(", ")}`)]
+    };
     await kvPut(env, "active_mission", updated);
     await kvPut(env, "mission:" + m.id, updated);
   }
-  await send(env, chatId, ["Improve Yes готово.", "✅ Patch применён через GitHub.", `Files: ${commits.map(x => x.path).join(", ")}`, p.switch_entry ? "Entry: switched" : "Entry: not changed", p.check_command ? `Жди деплой, затем проверь: ${p.check_command}` : "Проверка: /improve_status"].join("\n"));
+  await send(env, chatId, [
+    "Improve Yes готово.",
+    "✅ Patch применён через GitHub.",
+    `Files: ${commits.map(x => x.path).join(", ")}`,
+    p.switch_entry ? "Entry: switched" : "Entry: not changed",
+    p.check_command ? `Жди деплой, затем проверь: ${p.check_command}` : "Проверка: /improve_status"
+  ].join("\n"));
 }
 
 export default {
@@ -319,7 +349,7 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.improvement_runner = VERSION;
-        d.commands = [...new Set([...(d.commands || []), "/improve_status", "/improve_prepare", "/improve_review", "/improve_yes", "/improve_no", "/improve_clear"])];
+        d.commands = [...new Set([...(d.commands || []), "/improve_status", "/improve_prepare", "/improve_review", "/improve_yes", "/improve_no", "/improve_clear"])]
       }
       return json(d || { ok: true, improvement_runner: VERSION }, r.status);
     }
