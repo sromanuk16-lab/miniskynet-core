@@ -1,4 +1,4 @@
-import appWorker from "./worker-version-chain.js";
+import appWorker from "./worker-alive-sync.js";
 
 export default {
   async fetch(request, env, ctx) {
