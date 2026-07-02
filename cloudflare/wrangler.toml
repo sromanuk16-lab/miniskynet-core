@@ -1,5 +1,5 @@
 name = "miniskynet-core"
-main = "src/worker-file-operation.js"
+main = "src/worker-repo-operation.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
