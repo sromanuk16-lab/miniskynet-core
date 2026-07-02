@@ -1,5 +1,5 @@
 name = "miniskynet-core"
-main = "src/worker-repo-operation.js"
+main = "src/worker-github-ready.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
