@@ -1,6 +1,6 @@
 import baseWorker from "./worker-version-chain.js";
 
-const VERSION = "alive-sync-v1-real-level";
+const VERSION = "alive-sync-v2-system-map";
 const MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -53,6 +53,10 @@ function has(obj, status) {
   return obj.status === status;
 }
 
+function st(obj) {
+  return obj?.status || (obj ? "present" : "none");
+}
+
 async function snapshot(env) {
   const tasksData = await kvGet(env, "tasks", { tasks: [] });
   const memData = await kvGet(env, "memories", { memories: [] });
@@ -69,7 +73,8 @@ async function snapshot(env) {
     ghCommit: await kvGet(env, "github_commit_last", null),
     proof: await kvGet(env, "proof_stage_last", null),
     live: await kvGet(env, "live_step_last", null),
-    aliveSync: await kvGet(env, "alive_sync_state", {})
+    aliveSync: await kvGet(env, "alive_sync_state", {}),
+    naturalIntent: await kvGet(env, "last_natural_intent", null)
   };
 }
 
@@ -112,6 +117,7 @@ function weakText(s) {
   const weak = [];
   if (s.memories.length > 50) weak.push("память шумная, нужна гигиена");
   if (!has(s.live, "switched")) weak.push("live layer ещё не подтверждён");
+  if (!s.naturalIntent) weak.push("живой текст ещё не связан с mission-loop");
   if (!weak.length) weak.push("следующий риск — правка активного файла");
   return weak.join("; ");
 }
@@ -134,6 +140,47 @@ function reportText(s, reason = "tick") {
     `Слабо/блокер: ${weakText(s)}`,
     `Следующий шаг: ${nextStep(s)}`,
     "Control: старый selfcheck alive tick больше не вызывается этим cron-слоем."
+  ].join("\n");
+}
+
+function systemMapText(s) {
+  const connected = [];
+  if (s.mission) connected.push("mission");
+  if (s.review?.status === "yes") connected.push("review_yes");
+  if (s.action?.status === "yes") connected.push("action_yes");
+  if (s.fileOp) connected.push("file_operation");
+  if (s.repoOp) connected.push("repo_operation");
+  if (s.ghPrepare) connected.push("github_prepare");
+  if (s.ghCommit) connected.push("github_commit");
+  if (s.proof) connected.push("proof_stage");
+  if (s.live?.status === "switched") connected.push("live_layer");
+  if (s.aliveSync) connected.push("alive_sync");
+
+  return [
+    "System Map:",
+    `Version: ${VERSION}`,
+    "",
+    "Active chain:",
+    "wrangler → worker-current → alive-sync → version-chain → level-sync → proof/github layers",
+    "",
+    "KV state:",
+    `Memory: ${s.memories.length}`,
+    `Tasks: total ${s.tasks.length}, active ${activeTasks(s.tasks || [])}`,
+    `Mission: ${st(s.mission)}`,
+    `Review: ${st(s.review)}`,
+    `Action: ${st(s.action)}`,
+    `File operation: ${st(s.fileOp)}`,
+    `Repo operation: ${st(s.repoOp)}`,
+    `GitHub prepare: ${st(s.ghPrepare)}`,
+    `GitHub commit: ${st(s.ghCommit)}`,
+    `Proof stage: ${st(s.proof)}`,
+    `Live layer: ${st(s.live)}`,
+    `Alive sync: ${st(s.aliveSync)}`,
+    `Natural intent: ${st(s.naturalIntent)}`,
+    "",
+    `Connected modules: ${connected.join(", ") || "none"}`,
+    "Gaps: natural text router не запускает mission автоматически; voice input/output нет; memory пока не единый мозг.",
+    "Verdict: частично синхронизировано. Командная writer-цепочка работает; живой текст, голос и unified memory — следующие слои."
   ].join("\n");
 }
 
@@ -189,6 +236,10 @@ async function manualTick(env, chatId) {
   if (!r.ok) await send(env, chatId, "Alive Sync: не смог отправить tick. Проверь alive_on и owner_chat_id.");
 }
 
+async function showSystemMap(env, chatId) {
+  await send(env, chatId, systemMapText(await snapshot(env)));
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -197,7 +248,7 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.alive_sync_layer = VERSION;
-        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick"])]
+        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick", "/system_map"])]
       }
       return json(d || { ok: true, alive_sync_layer: VERSION }, r.status);
     }
@@ -213,6 +264,10 @@ export default {
       if (m && (text === "/alive_sync_tick" || text === "alive sync tick")) {
         await manualTick(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, alive_sync_tick: true });
+      }
+      if (m && (text === "/system_map" || text === "system map" || text === "карта системы")) {
+        await showSystemMap(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, system_map: true });
       }
     }
 
