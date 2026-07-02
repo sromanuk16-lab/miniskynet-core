@@ -1,6 +1,6 @@
 import baseWorker from "./worker-version-chain.js";
 
-const VERSION = "alive-sync-v2-system-map";
+const VERSION = "alive-sync-v3-core-orchestrator";
 const MIN_INTERVAL_MS = 30 * 60 * 1000;
 
 function json(data, status = 200) {
@@ -74,7 +74,9 @@ async function snapshot(env) {
     proof: await kvGet(env, "proof_stage_last", null),
     live: await kvGet(env, "live_step_last", null),
     aliveSync: await kvGet(env, "alive_sync_state", {}),
-    naturalIntent: await kvGet(env, "last_natural_intent", null)
+    naturalIntent: await kvGet(env, "last_natural_intent", null),
+    corePlan: await kvGet(env, "core_plan", null),
+    coreRun: await kvGet(env, "core_run", null)
   };
 }
 
@@ -95,10 +97,13 @@ function computeLevel(s) {
   if (has(s.ghCommit, "committed_safe_log")) { score += 0.75; flags.push("safe_commit"); }
   if (has(s.proof, "done")) { score += 0.35; flags.push("proof_stage"); }
   if (has(s.live, "switched")) { score += 0.1; flags.push("live_layer"); }
+  if (s.naturalIntent?.status === "captured") { score += 0.1; flags.push("natural_intent"); }
+  if (s.corePlan?.status) { score += 0.15; flags.push("core_plan"); }
   return { score: Math.max(1, Math.min(10, Number(score.toFixed(1)))), flags };
 }
 
 function stageName(s, score) {
+  if (s.corePlan?.status) return "Level 6.7 — Core Orchestrator connected";
   if (has(s.live, "switched")) return "Level 6.5 — Active Worker Layer Created";
   if (has(s.proof, "done")) return "Level 6.2 — Safe GitHub Writer + Proof Stage";
   if (has(s.ghCommit, "committed_safe_log")) return "Level 6.0 — Safe GitHub Writer работает";
@@ -107,19 +112,34 @@ function stageName(s, score) {
   return "Level 3 — legacy pipeline";
 }
 
+function weaknessList(s) {
+  const items = [];
+  if (!s.naturalIntent) items.push("natural text router ещё не ведёт задачи в mission loop");
+  if (!s.corePlan) items.push("нет единого core plan для следующего улучшения");
+  if (s.memories.length > 50) items.push("память шумная: нужна отдельная гигиена и типы памяти");
+  items.push("нет verify/rollback слоя после изменения активного entry");
+  items.push("voice input/output ещё не подключены");
+  return items;
+}
+
+function nextImprovement(s) {
+  if (!s.naturalIntent) return { id: "intent-router-v1", title: "Intent Router v1", goal: "живой текст превращается в system_scan / improvement_plan / mission_request", risk: "low-medium" };
+  if (!s.corePlan) return { id: "core-plan-v1", title: "Core Plan v1", goal: "единый план улучшения вместо отдельных KV-фрагментов", risk: "low" };
+  if (s.memories.length > 50) return { id: "memory-hygiene-v1", title: "Memory Hygiene v1", goal: "разделить шум, уроки, системные факты и проектную память", risk: "medium" };
+  return { id: "verify-rollback-v1", title: "Verify/Rollback v1", goal: "после любого switch проверять команду и уметь откатить entry", risk: "medium" };
+}
+
 function nextStep(s) {
   if (!has(s.live, "switched")) return "/version_chain затем /level";
+  if (!s.corePlan) return "/core_plan";
+  if (s.corePlan?.status === "planned") return "/core_approve";
+  if (s.corePlan?.status === "approved") return "/core_run";
   if (s.memories.length > 50) return "/memory_hygiene затем /level";
-  return "active file step: маленькая полезная правка активного слоя";
+  return "следующее улучшение через /core_next";
 }
 
 function weakText(s) {
-  const weak = [];
-  if (s.memories.length > 50) weak.push("память шумная, нужна гигиена");
-  if (!has(s.live, "switched")) weak.push("live layer ещё не подтверждён");
-  if (!s.naturalIntent) weak.push("живой текст ещё не связан с mission-loop");
-  if (!weak.length) weak.push("следующий риск — правка активного файла");
-  return weak.join("; ");
+  return weaknessList(s).slice(0, 3).join("; ");
 }
 
 function reportText(s, reason = "tick") {
@@ -137,6 +157,7 @@ function reportText(s, reason = "tick") {
     `GitHub commit: ${s.ghCommit?.status || "none"}`,
     `Proof stage: ${s.proof?.status || "none"}`,
     `Live layer: ${s.live?.status || "none"}`,
+    `Core plan: ${s.corePlan?.status || "none"}`,
     `Слабо/блокер: ${weakText(s)}`,
     `Следующий шаг: ${nextStep(s)}`,
     "Control: старый selfcheck alive tick больше не вызывается этим cron-слоем."
@@ -155,13 +176,15 @@ function systemMapText(s) {
   if (s.proof) connected.push("proof_stage");
   if (s.live?.status === "switched") connected.push("live_layer");
   if (s.aliveSync) connected.push("alive_sync");
+  if (s.corePlan) connected.push("core_plan");
+  if (s.naturalIntent) connected.push("natural_intent_capture");
 
   return [
     "System Map:",
     `Version: ${VERSION}`,
     "",
     "Active chain:",
-    "wrangler → worker-current → alive-sync → version-chain → level-sync → proof/github layers",
+    "wrangler → worker-current → alive-sync/core-orchestrator → version-chain → level-sync → proof/github layers",
     "",
     "KV state:",
     `Memory: ${s.memories.length}`,
@@ -177,11 +200,207 @@ function systemMapText(s) {
     `Live layer: ${st(s.live)}`,
     `Alive sync: ${st(s.aliveSync)}`,
     `Natural intent: ${st(s.naturalIntent)}`,
+    `Core plan: ${st(s.corePlan)}`,
     "",
     `Connected modules: ${connected.join(", ") || "none"}`,
-    "Gaps: natural text router не запускает mission автоматически; voice input/output нет; memory пока не единый мозг.",
-    "Verdict: частично синхронизировано. Командная writer-цепочка работает; живой текст, голос и unified memory — следующие слои."
+    `Gaps: ${weaknessList(s).join("; ")}`,
+    "Verdict: командная writer-цепочка работает; core orchestrator теперь ловит живые задачи и готовит единый план."
   ].join("\n");
+}
+
+function coreScanText(s) {
+  const lv = computeLevel(s);
+  const next = nextImprovement(s);
+  return [
+    "Core Scan:",
+    `Version: ${VERSION}`,
+    `Level: ${lv.score}/10`,
+    `Stage: ${stageName(s, lv.score)}`,
+    "",
+    "Работает:",
+    `- writer chain: ${s.ghCommit ? "yes" : "no"}`,
+    `- proof stage: ${s.proof ? "yes" : "no"}`,
+    `- live layer: ${s.live?.status || "none"}`,
+    `- alive sync: ${s.aliveSync ? "yes" : "no"}`,
+    "",
+    "Слабые места:",
+    ...weaknessList(s).map(x => "- " + x),
+    "",
+    "Следующее улучшение:",
+    `${next.title}: ${next.goal}`,
+    `Risk: ${next.risk}`,
+    "Команда: /core_plan"
+  ].join("\n");
+}
+
+function buildCorePlan(s, sourceText = "") {
+  const next = nextImprovement(s);
+  return {
+    id: "core_plan_" + Date.now(),
+    version: VERSION,
+    status: "planned",
+    improvement_id: next.id,
+    title: next.title,
+    goal: next.goal,
+    risk: next.risk,
+    source_text: sourceText.slice(0, 1000),
+    steps: [
+      "read system_map snapshot",
+      "classify user intent",
+      "create review/action plan",
+      "route to existing writer chain only after approve",
+      "verify result and save lesson"
+    ],
+    safe_rule: "no active entry switch without explicit approve",
+    next_command: "/core_approve",
+    created_at: new Date().toISOString()
+  };
+}
+
+function renderCorePlan(p) {
+  if (!p) return "Core Plan: none. Команда: /core_plan";
+  return [
+    "Core Plan:",
+    `ID: ${p.id}`,
+    `Status: ${p.status}`,
+    `Improvement: ${p.title}`,
+    `Goal: ${p.goal}`,
+    `Risk: ${p.risk}`,
+    "Steps:",
+    ...(p.steps || []).map((x, i) => `${i + 1}. ${x}`),
+    `Rule: ${p.safe_rule}`,
+    `Next: ${p.status === "planned" ? "/core_approve" : p.status === "approved" ? "/core_run" : "/core_next"}`
+  ].join("\n");
+}
+
+async function coreStatus(env, chatId) {
+  const s = await snapshot(env);
+  await send(env, chatId, [
+    "Core Status:",
+    `Version: ${VERSION}`,
+    `Plan: ${st(s.corePlan)}`,
+    `Run: ${st(s.coreRun)}`,
+    `Natural intent: ${st(s.naturalIntent)}`,
+    `Mission: ${st(s.mission)}`,
+    `Writer: ${st(s.ghCommit)}`,
+    `Live: ${st(s.live)}`,
+    `Next: ${nextStep(s)}`
+  ].join("\n"));
+}
+
+async function corePlan(env, chatId, sourceText = "") {
+  const p = buildCorePlan(await snapshot(env), sourceText);
+  await kvPut(env, "core_plan", p);
+  await send(env, chatId, renderCorePlan(p));
+}
+
+async function coreApprove(env, chatId) {
+  const p = await kvGet(env, "core_plan", null);
+  if (!p || p.status !== "planned") {
+    await send(env, chatId, "Core Approve: сначала /core_plan");
+    return;
+  }
+  const approved = { ...p, status: "approved", approved_at: new Date().toISOString(), next_command: "/core_run" };
+  await kvPut(env, "core_plan", approved);
+  await send(env, chatId, renderCorePlan(approved));
+}
+
+async function coreRun(env, chatId) {
+  const p = await kvGet(env, "core_plan", null);
+  if (!p || p.status !== "approved") {
+    await send(env, chatId, "Core Run: сначала /core_plan затем /core_approve");
+    return;
+  }
+
+  const run = {
+    id: "core_run_" + Date.now(),
+    version: VERSION,
+    status: "prepared",
+    plan_id: p.id,
+    improvement_id: p.improvement_id,
+    title: p.title,
+    result: "mission/review/action state prepared; code writer step remains gated by approve-specific layer",
+    next_command: p.improvement_id === "intent-router-v1" ? "создать dedicated intent-router layer" : "/core_next",
+    created_at: new Date().toISOString()
+  };
+  await kvPut(env, "core_run", run);
+
+  const mission = {
+    id: "mission_core_" + Date.now(),
+    status: "core_prepared",
+    current_step: "core_orchestrator_prepared",
+    goal: p.goal,
+    source: "core_orchestrator",
+    next_command: run.next_command,
+    updated_at: new Date().toISOString(),
+    events: [{ time: new Date().toISOString(), type: "core_run", status: "prepared", text: run.result }]
+  };
+  await kvPut(env, "active_mission", mission);
+  await kvPut(env, "mission:" + mission.id, mission);
+
+  const review = {
+    id: "review_core_" + Date.now(),
+    status: "pending",
+    source: "core_orchestrator",
+    mission_id: mission.id,
+    title: p.title,
+    goal: p.goal,
+    risk: p.risk,
+    recommendation: "next implementation should be a small active layer with explicit approve",
+    created_at: new Date().toISOString()
+  };
+  await kvPut(env, "review_card", review);
+
+  await send(env, chatId, [
+    "Core Run prepared:",
+    `Mission: ${mission.id}`,
+    `Review: ${review.id}`,
+    `Improvement: ${p.title}`,
+    "Статус: единый контур создан в KV.",
+    "Следующий шаг: dedicated active layer для intent router, затем verify/rollback."
+  ].join("\n"));
+}
+
+async function coreNext(env, chatId) {
+  const s = await snapshot(env);
+  const next = nextImprovement(s);
+  await send(env, chatId, [
+    "Core Next:",
+    `Next improvement: ${next.title}`,
+    `Goal: ${next.goal}`,
+    `Risk: ${next.risk}`,
+    "Command: /core_plan"
+  ].join("\n"));
+}
+
+function classifyNaturalText(raw) {
+  const t = String(raw || "").toLowerCase().trim();
+  if (!t || t.startsWith("/")) return null;
+  const hasWake = t.includes("скайнет") || t.includes("skynet");
+  const asksScan = t.includes("проверь") || t.includes("что работает") || t.includes("слаб") || t.includes("синхрон") || t.includes("карта системы");
+  const asksImprove = t.includes("улучш") || t.includes("сделай") || t.includes("добавь") || t.includes("почини") || t.includes("реализ") || t.includes("внедр");
+  if (hasWake && asksScan) return "system_scan";
+  if (hasWake && asksImprove) return "improvement_plan";
+  if (asksScan && t.includes("себ")) return "system_scan";
+  if (asksImprove && (t.includes("себ") || t.includes("систем") || t.includes("памят") || t.includes("голос") || t.includes("текст"))) return "improvement_plan";
+  return null;
+}
+
+async function handleNatural(env, chatId, raw, kind) {
+  const intent = {
+    id: "intent_" + Date.now(),
+    version: VERSION,
+    status: "captured",
+    kind,
+    text: String(raw || "").slice(0, 1000),
+    created_at: new Date().toISOString()
+  };
+  await kvPut(env, "last_natural_intent", intent);
+  if (kind === "system_scan") {
+    await send(env, chatId, "Natural Intent: system_scan\nЗапускаю core scan вместо model fallback.\n\n" + coreScanText(await snapshot(env)));
+    return;
+  }
+  await corePlan(env, chatId, raw);
 }
 
 async function bumpCycle(env, brain) {
@@ -220,7 +439,8 @@ async function runAliveSync(env, reason = "tick", force = false) {
     last_sent_ms: now,
     last_sent_at: new Date().toISOString(),
     last_level: computeLevel(s).score,
-    last_stage: stageName(s, computeLevel(s).score)
+    last_stage: stageName(s, computeLevel(s).score),
+    last_core_next: nextImprovement(s).id
   });
   await send(env, chatId, reportText(s, reason));
   return { ok: true };
@@ -248,15 +468,17 @@ export default {
       const d = await r.json().catch(() => null);
       if (d && typeof d === "object") {
         d.alive_sync_layer = VERSION;
-        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick", "/system_map"])]
+        d.core_orchestrator = true;
+        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick", "/system_map", "/core_status", "/core_scan", "/core_next", "/core_plan", "/core_approve", "/core_run"])]
       }
-      return json(d || { ok: true, alive_sync_layer: VERSION }, r.status);
+      return json(d || { ok: true, alive_sync_layer: VERSION, core_orchestrator: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       const u = await request.clone().json().catch(() => null);
       const m = getMsg(u);
-      const text = String(m?.text || "").trim().toLowerCase();
+      const raw = String(m?.text || "").trim();
+      const text = raw.toLowerCase();
       if (m && (text === "/alive_sync_status" || text === "alive sync status")) {
         await status(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, alive_sync_status: true });
@@ -268,6 +490,37 @@ export default {
       if (m && (text === "/system_map" || text === "system map" || text === "карта системы")) {
         await showSystemMap(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, system_map: true });
+      }
+      if (m && (text === "/core_status" || text === "core status")) {
+        await coreStatus(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, core_status: true });
+      }
+      if (m && (text === "/core_scan" || text === "core scan" || text === "проверь себя")) {
+        await send(env, m.chat.id, coreScanText(await snapshot(env)));
+        return json({ ok: true, handled_by: VERSION, core_scan: true });
+      }
+      if (m && (text === "/core_next" || text === "core next")) {
+        await coreNext(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, core_next: true });
+      }
+      if (m && (text === "/core_plan" || text === "core plan")) {
+        await corePlan(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, core_plan: true });
+      }
+      if (m && (text === "/core_approve" || text === "core approve" || text === "/approve")) {
+        await coreApprove(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, core_approve: true });
+      }
+      if (m && (text === "/core_run" || text === "core run")) {
+        await coreRun(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, core_run: true });
+      }
+      if (m) {
+        const kind = classifyNaturalText(raw);
+        if (kind) {
+          await handleNatural(env, m.chat.id, raw, kind);
+          return json({ ok: true, handled_by: VERSION, natural_intent: kind });
+        }
       }
     }
 
