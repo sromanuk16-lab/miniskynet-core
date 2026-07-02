@@ -1,4 +1,4 @@
-import appWorker from "./worker-review-adapter.js";
+import appWorker from "./worker-sky-dialog.js";
 
 export default {
   async fetch(request, env, ctx) {
