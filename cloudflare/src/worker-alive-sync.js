@@ -1,7 +1,11 @@
 import baseWorker from "./worker-version-chain.js";
 
-const VERSION = "alive-sync-v3-core-orchestrator";
+const VERSION = "alive-sync-v4-safe-verify";
 const MIN_INTERVAL_MS = 30 * 60 * 1000;
+const REPO = "sromanuk16-lab/miniskynet-core";
+const BRANCH = "main";
+const ENTRY_PATH = "cloudflare/src/worker-current.js";
+const SAFE_IMPORT = "./worker-alive-sync.js";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -12,9 +16,11 @@ function json(data, status = 200) {
 
 async function hydrate(env) {
   if (!env.MINISKYNET_KV) return;
-  if (!env.TELEGRAM_BOT_TOKEN) {
-    const v = await env.MINISKYNET_KV.get("config:TELEGRAM_BOT_TOKEN");
-    if (v) env.TELEGRAM_BOT_TOKEN = String(v).trim();
+  for (const k of ["TELEGRAM_BOT_TOKEN", "GITHUB_TOKEN"]) {
+    if (!env[k]) {
+      const v = await env.MINISKYNET_KV.get("config:" + k);
+      if (v) env[k] = String(v).trim();
+    }
   }
 }
 
@@ -57,6 +63,56 @@ function st(obj) {
   return obj?.status || (obj ? "present" : "none");
 }
 
+function safeEntryContent() {
+  return `import appWorker from "${SAFE_IMPORT}";\n\nexport default {\n  async fetch(request, env, ctx) {\n    return await appWorker.fetch(request, env, ctx);\n  },\n  async scheduled(event, env, ctx) {\n    return await appWorker.scheduled(event, env, ctx);\n  }\n};\n`;
+}
+
+function utf8ToBase64(s) {
+  const bytes = new TextEncoder().encode(s);
+  let bin = "";
+  for (const b of bytes) bin += String.fromCharCode(b);
+  return btoa(bin);
+}
+
+async function tokenReady(env) {
+  await hydrate(env);
+  return Boolean(env.GITHUB_TOKEN && String(env.GITHUB_TOKEN).length > 20);
+}
+
+async function gh(env, method, path, body) {
+  await hydrate(env);
+  const res = await fetch(`https://api.github.com${path}`, {
+    method,
+    headers: {
+      "accept": "application/vnd.github+json",
+      "authorization": `Bearer ${env.GITHUB_TOKEN}`,
+      "content-type": "application/json",
+      "user-agent": "MiniSkynet-Core"
+    },
+    body: body ? JSON.stringify(body) : undefined
+  });
+  const text = await res.text();
+  let data = null;
+  try { data = JSON.parse(text); } catch (_) { data = { raw: text }; }
+  return { ok: res.ok, status: res.status, data };
+}
+
+async function fileSha(env, repo, branch, path) {
+  const apiPath = `/repos/${repo}/contents/${encodeURIComponent(path).replaceAll("%2F", "/")}?ref=${encodeURIComponent(branch)}`;
+  const r = await gh(env, "GET", apiPath);
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`read failed ${r.status}`);
+  return r.data.sha || null;
+}
+
+async function putFile(env, repo, branch, path, content, message) {
+  const sha = await fileSha(env, repo, branch, path);
+  const apiPath = `/repos/${repo}/contents/${encodeURIComponent(path).replaceAll("%2F", "/")}`;
+  const body = { message, content: utf8ToBase64(content), branch };
+  if (sha) body.sha = sha;
+  return await gh(env, "PUT", apiPath, body);
+}
+
 async function snapshot(env) {
   const tasksData = await kvGet(env, "tasks", { tasks: [] });
   const memData = await kvGet(env, "memories", { memories: [] });
@@ -76,7 +132,10 @@ async function snapshot(env) {
     aliveSync: await kvGet(env, "alive_sync_state", {}),
     naturalIntent: await kvGet(env, "last_natural_intent", null),
     corePlan: await kvGet(env, "core_plan", null),
-    coreRun: await kvGet(env, "core_run", null)
+    coreRun: await kvGet(env, "core_run", null),
+    verifyState: await kvGet(env, "verify_state", null),
+    safeEntry: await kvGet(env, "safe_entry", null),
+    restoreState: await kvGet(env, "restore_state", null)
   };
 }
 
@@ -99,10 +158,12 @@ function computeLevel(s) {
   if (has(s.live, "switched")) { score += 0.1; flags.push("live_layer"); }
   if (s.naturalIntent?.status === "captured") { score += 0.1; flags.push("natural_intent"); }
   if (s.corePlan?.status) { score += 0.15; flags.push("core_plan"); }
+  if (s.verifyState?.status === "verified") { score += 0.2; flags.push("verified_safe"); }
   return { score: Math.max(1, Math.min(10, Number(score.toFixed(1)))), flags };
 }
 
 function stageName(s, score) {
+  if (s.verifyState?.status === "verified") return "Level 7.0 — Verified Safe Entry";
   if (s.corePlan?.status) return "Level 6.7 — Core Orchestrator connected";
   if (has(s.live, "switched")) return "Level 6.5 — Active Worker Layer Created";
   if (has(s.proof, "done")) return "Level 6.2 — Safe GitHub Writer + Proof Stage";
@@ -117,23 +178,25 @@ function weaknessList(s) {
   if (!s.naturalIntent) items.push("natural text router ещё не ведёт задачи в mission loop");
   if (!s.corePlan) items.push("нет единого core plan для следующего улучшения");
   if (s.memories.length > 50) items.push("память шумная: нужна отдельная гигиена и типы памяти");
-  items.push("нет verify/rollback слоя после изменения активного entry");
+  if (!s.verifyState || s.verifyState.status !== "verified") items.push("нет подтверждённого safe entry для восстановления после смены entry");
   items.push("voice input/output ещё не подключены");
   return items;
 }
 
 function nextImprovement(s) {
+  if (!s.verifyState || s.verifyState.status !== "verified") return { id: "verify-rollback-v1", title: "Verify/Rollback v1", goal: "проверить рабочий entry и сохранить безопасную точку восстановления", risk: "low" };
   if (!s.naturalIntent) return { id: "intent-router-v1", title: "Intent Router v1", goal: "живой текст превращается в system_scan / improvement_plan / mission_request", risk: "low-medium" };
   if (!s.corePlan) return { id: "core-plan-v1", title: "Core Plan v1", goal: "единый план улучшения вместо отдельных KV-фрагментов", risk: "low" };
   if (s.memories.length > 50) return { id: "memory-hygiene-v1", title: "Memory Hygiene v1", goal: "разделить шум, уроки, системные факты и проектную память", risk: "medium" };
-  return { id: "verify-rollback-v1", title: "Verify/Rollback v1", goal: "после любого switch проверять команду и уметь откатить entry", risk: "medium" };
+  return { id: "review-adapter-v1", title: "Review Adapter v1", goal: "старые review/action команды понимают новый core-review формат", risk: "low-medium" };
 }
 
 function nextStep(s) {
   if (!has(s.live, "switched")) return "/version_chain затем /level";
+  if (!s.verifyState || s.verifyState.status !== "verified") return "/verify_current";
   if (!s.corePlan) return "/core_plan";
   if (s.corePlan?.status === "planned") return "/core_approve";
-  if (s.corePlan?.status === "approved") return "/core_run";
+  if (s.corePlan?.status === "approved" && !s.coreRun) return "/core_run";
   if (s.memories.length > 50) return "/memory_hygiene затем /level";
   return "следующее улучшение через /core_next";
 }
@@ -158,6 +221,7 @@ function reportText(s, reason = "tick") {
     `Proof stage: ${s.proof?.status || "none"}`,
     `Live layer: ${s.live?.status || "none"}`,
     `Core plan: ${s.corePlan?.status || "none"}`,
+    `Verify: ${s.verifyState?.status || "none"}`,
     `Слабо/блокер: ${weakText(s)}`,
     `Следующий шаг: ${nextStep(s)}`,
     "Control: старый selfcheck alive tick больше не вызывается этим cron-слоем."
@@ -167,7 +231,7 @@ function reportText(s, reason = "tick") {
 function systemMapText(s) {
   const connected = [];
   if (s.mission) connected.push("mission");
-  if (s.review?.status === "yes") connected.push("review_yes");
+  if (s.review?.status === "yes" || s.review?.status === "pending") connected.push("review");
   if (s.action?.status === "yes") connected.push("action_yes");
   if (s.fileOp) connected.push("file_operation");
   if (s.repoOp) connected.push("repo_operation");
@@ -178,13 +242,14 @@ function systemMapText(s) {
   if (s.aliveSync) connected.push("alive_sync");
   if (s.corePlan) connected.push("core_plan");
   if (s.naturalIntent) connected.push("natural_intent_capture");
+  if (s.verifyState?.status === "verified") connected.push("verified_safe_entry");
 
   return [
     "System Map:",
     `Version: ${VERSION}`,
     "",
     "Active chain:",
-    "wrangler → worker-current → alive-sync/core-orchestrator → version-chain → level-sync → proof/github layers",
+    "wrangler → worker-current → alive-sync/core-orchestrator/verify → version-chain → level-sync → proof/github layers",
     "",
     "KV state:",
     `Memory: ${s.memories.length}`,
@@ -201,10 +266,13 @@ function systemMapText(s) {
     `Alive sync: ${st(s.aliveSync)}`,
     `Natural intent: ${st(s.naturalIntent)}`,
     `Core plan: ${st(s.corePlan)}`,
+    `Core run: ${st(s.coreRun)}`,
+    `Verify: ${st(s.verifyState)}`,
+    `Safe entry: ${st(s.safeEntry)}`,
     "",
     `Connected modules: ${connected.join(", ") || "none"}`,
     `Gaps: ${weaknessList(s).join("; ")}`,
-    "Verdict: командная writer-цепочка работает; core orchestrator теперь ловит живые задачи и готовит единый план."
+    "Verdict: командная writer-цепочка работает; core orchestrator ловит живые задачи; verify layer теперь должен закрепить safe entry."
   ].join("\n");
 }
 
@@ -222,6 +290,7 @@ function coreScanText(s) {
     `- proof stage: ${s.proof ? "yes" : "no"}`,
     `- live layer: ${s.live?.status || "none"}`,
     `- alive sync: ${s.aliveSync ? "yes" : "no"}`,
+    `- verify layer: ${s.verifyState?.status === "verified" ? "yes" : "no"}`,
     "",
     "Слабые места:",
     ...weaknessList(s).map(x => "- " + x),
@@ -229,7 +298,7 @@ function coreScanText(s) {
     "Следующее улучшение:",
     `${next.title}: ${next.goal}`,
     `Risk: ${next.risk}`,
-    "Команда: /core_plan"
+    `Команда: ${next.id === "verify-rollback-v1" ? "/verify_current" : "/core_plan"}`
   ].join("\n");
 }
 
@@ -284,6 +353,8 @@ async function coreStatus(env, chatId) {
     `Mission: ${st(s.mission)}`,
     `Writer: ${st(s.ghCommit)}`,
     `Live: ${st(s.live)}`,
+    `Verify: ${st(s.verifyState)}`,
+    `Safe entry: ${st(s.safeEntry)}`,
     `Next: ${nextStep(s)}`
   ].join("\n"));
 }
@@ -320,7 +391,7 @@ async function coreRun(env, chatId) {
     improvement_id: p.improvement_id,
     title: p.title,
     result: "mission/review/action state prepared; code writer step remains gated by approve-specific layer",
-    next_command: p.improvement_id === "intent-router-v1" ? "создать dedicated intent-router layer" : "/core_next",
+    next_command: p.improvement_id === "verify-rollback-v1" ? "/verify_current" : "создать dedicated active layer для следующего шага",
     created_at: new Date().toISOString()
   };
   await kvPut(env, "core_run", run);
@@ -357,7 +428,7 @@ async function coreRun(env, chatId) {
     `Review: ${review.id}`,
     `Improvement: ${p.title}`,
     "Статус: единый контур создан в KV.",
-    "Следующий шаг: dedicated active layer для intent router, затем verify/rollback."
+    `Следующий шаг: ${run.next_command}`
   ].join("\n"));
 }
 
@@ -369,7 +440,7 @@ async function coreNext(env, chatId) {
     `Next improvement: ${next.title}`,
     `Goal: ${next.goal}`,
     `Risk: ${next.risk}`,
-    "Command: /core_plan"
+    `Command: ${next.id === "verify-rollback-v1" ? "/verify_current" : "/core_plan"}`
   ].join("\n"));
 }
 
@@ -401,6 +472,111 @@ async function handleNatural(env, chatId, raw, kind) {
     return;
   }
   await corePlan(env, chatId, raw);
+}
+
+async function verifyCurrent(env, chatId) {
+  const s = await snapshot(env);
+  const ok = Boolean(s.ghCommit && s.proof && s.live?.status === "switched" && s.aliveSync && s.mission);
+  const state = {
+    version: VERSION,
+    status: ok ? "verified" : "warning",
+    verified_at: new Date().toISOString(),
+    checks: {
+      github_commit: st(s.ghCommit),
+      proof_stage: st(s.proof),
+      live_layer: st(s.live),
+      alive_sync: st(s.aliveSync),
+      core_orchestrator: true
+    },
+    safe_entry_path: ENTRY_PATH,
+    safe_import: SAFE_IMPORT
+  };
+  await kvPut(env, "verify_state", state);
+  if (ok) {
+    await kvPut(env, "safe_entry", {
+      version: VERSION,
+      status: "ready",
+      path: ENTRY_PATH,
+      import_path: SAFE_IMPORT,
+      content: safeEntryContent(),
+      saved_at: new Date().toISOString(),
+      reason: "current alive-sync/core-orchestrator route verified from Telegram"
+    });
+  }
+  await send(env, chatId, [
+    "Verify Current:",
+    `Status: ${state.status}`,
+    `GitHub commit: ${state.checks.github_commit}`,
+    `Proof stage: ${state.checks.proof_stage}`,
+    `Live layer: ${state.checks.live_layer}`,
+    `Alive sync: ${state.checks.alive_sync}`,
+    `Safe entry: ${ok ? "saved" : "not_saved"}`,
+    `Rollback target: ${ENTRY_PATH} → ${SAFE_IMPORT}`,
+    `Next: ${ok ? "/rollback_status" : "/system_map"}`
+  ].join("\n"));
+}
+
+async function verifyStatus(env, chatId) {
+  const s = await snapshot(env);
+  await send(env, chatId, [
+    "Verify/Rollback Status:",
+    `Version: ${VERSION}`,
+    `Verify: ${st(s.verifyState)}`,
+    `Safe entry: ${st(s.safeEntry)}`,
+    `Restore: ${st(s.restoreState)}`,
+    `Safe path: ${s.safeEntry?.path || ENTRY_PATH}`,
+    `Safe import: ${s.safeEntry?.import_path || SAFE_IMPORT}`,
+    `Token: ${(await tokenReady(env)) ? "connected" : "not_connected"}`,
+    `Next: ${s.verifyState?.status === "verified" ? "/rollback_status" : "/verify_current"}`
+  ].join("\n"));
+}
+
+async function rollbackStatus(env, chatId) {
+  const safe = await kvGet(env, "safe_entry", null);
+  const restore = await kvGet(env, "restore_state", null);
+  await send(env, chatId, [
+    "Rollback Status:",
+    `Safe entry: ${st(safe)}`,
+    `Safe import: ${safe?.import_path || "none"}`,
+    `Saved at: ${safe?.saved_at || "none"}`,
+    `Last restore: ${restore?.status || "none"}`,
+    "Команда восстановления: /rollback_to_safe",
+    "Важно: использовать только если новый entry сломался."
+  ].join("\n"));
+}
+
+async function rollbackToSafe(env, chatId) {
+  const safe = await kvGet(env, "safe_entry", null);
+  if (!safe || !safe.content) {
+    await send(env, chatId, "Rollback: safe entry не найден. Сначала /verify_current.");
+    return;
+  }
+  if (!(await tokenReady(env))) {
+    await send(env, chatId, "Rollback: GitHub token not_connected.");
+    return;
+  }
+  const r = await putFile(env, REPO, BRANCH, ENTRY_PATH, safe.content, "MiniSkynet safe restore entry");
+  if (!r.ok) {
+    await kvPut(env, "restore_state", { status: "failed", http_status: r.status, error: r.data, updated_at: new Date().toISOString() });
+    await send(env, chatId, `Rollback failed: HTTP ${r.status}`);
+    return;
+  }
+  const done = {
+    version: VERSION,
+    status: "restored",
+    path: ENTRY_PATH,
+    import_path: safe.import_path,
+    commit_sha: r.data?.commit?.sha || "unknown",
+    updated_at: new Date().toISOString()
+  };
+  await kvPut(env, "restore_state", done);
+  await send(env, chatId, [
+    "Rollback готов.",
+    `Entry: ${ENTRY_PATH}`,
+    `Import: ${safe.import_path}`,
+    `Commit: ${done.commit_sha}`,
+    "После деплоя проверь: /system_map"
+  ].join("\n"));
 }
 
 async function bumpCycle(env, brain) {
@@ -469,9 +645,10 @@ export default {
       if (d && typeof d === "object") {
         d.alive_sync_layer = VERSION;
         d.core_orchestrator = true;
-        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick", "/system_map", "/core_status", "/core_scan", "/core_next", "/core_plan", "/core_approve", "/core_run"])]
+        d.verify_rollback = true;
+        d.commands = [...new Set([...(d.commands || []), "/alive_sync_status", "/alive_sync_tick", "/system_map", "/core_status", "/core_scan", "/core_next", "/core_plan", "/core_approve", "/core_run", "/verify_status", "/verify_current", "/rollback_status", "/rollback_to_safe"])]
       }
-      return json(d || { ok: true, alive_sync_layer: VERSION, core_orchestrator: true }, r.status);
+      return json(d || { ok: true, alive_sync_layer: VERSION, core_orchestrator: true, verify_rollback: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
@@ -514,6 +691,22 @@ export default {
       if (m && (text === "/core_run" || text === "core run")) {
         await coreRun(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, core_run: true });
+      }
+      if (m && (text === "/verify_status" || text === "verify status")) {
+        await verifyStatus(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, verify_status: true });
+      }
+      if (m && (text === "/verify_current" || text === "verify current")) {
+        await verifyCurrent(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, verify_current: true });
+      }
+      if (m && (text === "/rollback_status" || text === "rollback status" || text === "restore status")) {
+        await rollbackStatus(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, rollback_status: true });
+      }
+      if (m && (text === "/rollback_to_safe" || text === "rollback to safe" || text === "/safe_restore")) {
+        await rollbackToSafe(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, rollback_to_safe: true });
       }
       if (m) {
         const kind = classifyNaturalText(raw);
