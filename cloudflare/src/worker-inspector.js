@@ -1,6 +1,6 @@
 import codeMapWorker from "./worker-codemap.js";
 
-const VERSION = "inspector-v8-structured-audit";
+const VERSION = "inspector-v9-growth-done";
 
 function json(data, status = 200) {
   return new Response(JSON.stringify(data, null, 2), {
@@ -65,7 +65,7 @@ function allowedCommand(command) {
     "/start", "/status", "/level", "/memory", "/tasks", "/cost",
     "/inspect_self", "/next_module", "/code_map", "/agents",
     "/self_audit", "/grow_one", "/memory_hygiene", "/tasks_hygiene",
-    "/alive_on", "/alive_off", "/last_auto_audit", "/growth_queue", "/growth_hygiene"
+    "/alive_on", "/alive_off", "/last_auto_audit", "/growth_queue", "/growth_hygiene", "/growth_done"
   ]).has(c);
 }
 
@@ -147,14 +147,14 @@ function weaknesses(s) {
 function inspectText(s) {
   const body = s.code_files.length ? s.code_files : safeFiles();
   return [
-    "Self Inspection v8:",
+    "Self Inspection v9:",
     `Активный слой: ${s.active_layer}`,
     "Текущее тело:",
     ...body.map(x => "- " + x),
-    "Что умею: level, structured self_audit, last_auto_audit, growth_queue, growth_hygiene, code map, agent runner, dynamic next module.",
+    "Что умею: level, structured self_audit, last_auto_audit, growth_queue, growth_hygiene, growth_done, code map, agent runner, dynamic next module.",
     `Состояние: alive=${s.alive}, cycles=${s.cycles_total}, memories=${s.memories_total}, archived_memories=${s.memory_archive_total}, tasks=${s.tasks_total}, active_tasks=${s.active_tasks}, growth_tasks=${s.growth_tasks}, invalid_growth_tasks=${s.invalid_growth_tasks}, agents=${s.agents_total}`,
     `Главная слабость: ${weaknesses(s).join("; ")}`,
-    "Control: inspector создаёт только валидные задачи роста: allowlist file + реальная команда проверки."
+    "Control: inspector создаёт валидные задачи роста и умеет закрывать выполненную задачу через /growth_done."
   ].join("\n");
 }
 
@@ -165,19 +165,19 @@ async function inspect(env, chatId) {
 }
 
 function renderLevel(s) {
-  const score = s.growth_tasks > 0 ? 3.2 : 3.0;
+  const score = s.growth_stage === "growth_task_done" ? 3.4 : (s.growth_tasks > 0 ? 3.2 : 3.0);
   return [
     `Уровень: ${score}/10`,
-    "Стадия: Level 3 — Audit → Memory → Valid Task Queue",
+    "Стадия: Level 3 — Audit → Memory → Valid Task Queue → Done",
     "Думает: по запросу, /self_audit или alive tick; inspector перехватывает /level и /self_audit выше старого selfcheck.",
-    "Обучается: памятью, задачами, картой кода и инженерными спецификациями.",
+    "Обучается: памятью, задачами, картой кода, инженерными спецификациями и закрытием выполненных growth-задач.",
     `Alive: ${s.alive}`,
     `Циклы: всего ${s.cycles_total}`,
     `Память: ${s.memories_total}, архив памяти ${s.memory_archive_total}`,
     `Задачи: всего ${s.tasks_total}, активных ${s.active_tasks}, growth_tasks ${s.growth_tasks}, invalid_growth_tasks ${s.invalid_growth_tasks}`,
     `Growth stage: ${s.growth_stage}`,
     `Сломано/слабо: ${weaknesses(s).join("; ")}`,
-    `Следующий шаг: ${s.growth_tasks > 0 ? "/growth_queue → /agent coder по первой задаче" : "/self_audit → /growth_queue"}`
+    `Следующий шаг: ${s.growth_tasks > 0 ? "/growth_queue → /growth_done если проверка уже прошла" : "/self_audit → /growth_queue"}`
   ].join("\n");
 }
 
@@ -371,10 +371,71 @@ async function cleanGrowthQueue(env, chatId) {
   await send(env, chatId, [`Growth Hygiene готова.`, `Архивировано мусорных задач: ${archived}`, `Проверка: /growth_queue`].join("\n"));
 }
 
+async function markGrowthDone(env, chatId) {
+  const taskData = await kvGet(env, "tasks", { tasks: [] });
+  const tasks = Array.isArray(taskData.tasks) ? taskData.tasks : [];
+  const active = tasks.filter(t => t.status !== "archived" && t.status !== "done");
+  const valid = active.filter(taskIsGrowth).filter(taskIsValid);
+
+  if (!valid.length) {
+    await send(env, chatId, "Growth Done: нет валидной active growth-задачи. Команда: /self_audit");
+    return;
+  }
+
+  const task = valid.slice(-1)[0];
+  const now = new Date().toISOString();
+  const cleaned = tasks.map(t => {
+    if (t.id === task.id) {
+      return { ...t, status: "done", done_at: now, updated_at: now, done_reason: "marked_by_growth_done" };
+    }
+    return t;
+  });
+  await kvPut(env, "tasks", { ...taskData, tasks: cleaned, updated_at: now });
+
+  const memData = await kvGet(env, "memories", { memories: [] });
+  const memories = Array.isArray(memData.memories) ? memData.memories : [];
+  const lessonKey = `done|${task.key || task.id}`;
+  if (!memories.some(m => m.key === lessonKey)) {
+    memories.push({
+      id: "mem_done_" + Date.now(),
+      key: lessonKey,
+      type: "growth_task_done",
+      status: "active",
+      source: "growth_done",
+      file: task.file,
+      lesson: `Growth-задача закрыта: ${task.title || task.file}`,
+      action: task.new_logic || task.action || "задача отмечена выполненной",
+      check: task.check,
+      risk: task.risk,
+      created_at: now
+    });
+    await kvPut(env, "memories", { ...memData, memories: memories.slice(-140), updated_at: now });
+  }
+
+  const growth = await kvGet(env, "growth_state", {});
+  await kvPut(env, "growth_state", {
+    ...growth,
+    stage: "growth_task_done",
+    last_done_at: now,
+    last_done_key: task.key || task.id,
+    last_done_file: task.file,
+    updated_at: now
+  });
+
+  await send(env, chatId, [
+    "Growth Done готово.",
+    `Закрыта задача: ${task.title || task.file}`,
+    `Файл: ${task.file}`,
+    `Проверка: ${task.check}`,
+    "Память: урок записан",
+    "Следующий шаг: /growth_queue затем /next_module"
+  ].join("\n"));
+}
+
 function nextModulePlan(s) {
   if (s.invalid_growth_tasks > 0) return { title: "Growth Queue Hygiene", command: "/growth_hygiene", reason: "очередь роста содержит мусорные задачи.", risk: "можно скрыть слабую, но потенциально полезную идею", check: "/growth_hygiene затем /growth_queue" };
   if (s.files_total < 7) return { title: "Refresh Code Map", command: "/code_map", reason: "code_map неполный или устарел.", risk: "решения будут строиться на неполной карте", check: "/code_map затем /inspect_self" };
-  if (s.growth_tasks > 0 && s.latest_growth_task?.file) return { title: "Work Latest Growth Task", command: `/agent coder дай change spec для ${s.latest_growth_task.file}: ${s.latest_growth_task.title || s.latest_growth_task.new_logic || "growth task"}`, reason: "есть валидная задача роста.", risk: "агент может дать слишком общий spec", check: "/agent tester проверить этот change spec" };
+  if (s.growth_tasks > 0 && s.latest_growth_task?.file) return { title: "Close Verified Growth Task", command: "/growth_done", reason: "есть валидная задача роста; если проверка уже прошла, её нужно закрыть и записать урок.", risk: "можно закрыть задачу раньше фактической проверки", check: "/growth_done затем /growth_queue" };
   return { title: "Run Structured Audit", command: "/self_audit", reason: "нужна валидная задача роста.", risk: "детерминированный audit может быть узким", check: "/self_audit затем /growth_queue" };
 }
 
@@ -400,9 +461,10 @@ export default {
         d.self_inspector = VERSION;
         d.structured_audit = true;
         d.queue_filter = true;
-        d.commands = ["/level", "/inspect_self", "/next_module", "/self_audit", "/last_auto_audit", "/growth_queue", "/growth_hygiene"];
+        d.growth_done = true;
+        d.commands = ["/level", "/inspect_self", "/next_module", "/self_audit", "/last_auto_audit", "/growth_queue", "/growth_hygiene", "/growth_done"];
       }
-      return json(d || { ok: true, self_inspector: VERSION, structured_audit: true, queue_filter: true }, r.status);
+      return json(d || { ok: true, self_inspector: VERSION, structured_audit: true, queue_filter: true, growth_done: true }, r.status);
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
@@ -437,6 +499,10 @@ export default {
       if (m && (low === "/growth_hygiene" || low === "почисти очередь роста")) {
         await cleanGrowthQueue(env, m.chat.id);
         return json({ ok: true, handled_by: VERSION, growth_hygiene: true });
+      }
+      if (m && (low === "/growth_done" || low === "закрой задачу роста")) {
+        await markGrowthDone(env, m.chat.id);
+        return json({ ok: true, handled_by: VERSION, growth_done: true });
       }
     }
 
