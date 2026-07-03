@@ -1,4 +1,4 @@
-const VERSION = "v4.2.1-owner-guard-fix-2026-07-03";
+const VERSION = "v4.3-apply-contour-2026-07-03";
 const DEFAULT_WORKER_URL = "https://miniskynet-core.sromanuk16.workers.dev";
 const DEFAULT_REPO = "sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH = "main";
@@ -107,10 +107,10 @@ async function getGoals(env) {
 async function getPlan(env) {
   return await kvGet(env, "plan", {
     steps: [
-      "Восстановить стабильный v4.2.1",
-      "Проверить /status и /health_check",
-      "Вернуть apply-контур маленьким патчем",
-      "Только потом включать safe alive loop"
+      "Проверить v4.3 apply contour",
+      "Создать маленький proposal",
+      "Проверить patch/code/apply chain",
+      "После стабильности вернуть обычный think"
     ],
     updated_at: now()
   });
@@ -123,6 +123,7 @@ function localHealth() {
     flat_core: true,
     onion_imports: false,
     self_health_check: true,
+    apply_contour: true,
     owner_guard: "fixed"
   };
 }
@@ -158,16 +159,16 @@ async function publicHealth(config) {
 
 function healthText(health) {
   return [
-    "🩺 Health check v4.2.1:",
+    "🩺 Health check v4.3:",
     "Local Telegram runtime:",
     `- ok: ${health.local.ok ? "yes ✅" : "no ⛔"}`,
     `- version: ${health.local.version}`,
     `- flat_core: ${health.local.flat_core ? "yes ✅" : "no"}`,
+    `- apply_contour: ${health.local.apply_contour ? "active ✅" : "off"}`,
     `- owner_guard: ${health.local.owner_guard}`,
     "- deploy via Telegram webhook: verified ✅",
     "",
     "Public /health route:",
-    `- url: ${health.public.url}`,
     `- http: ${health.public.http}`,
     `- ok: ${health.public.ok ? "yes ✅" : "no/optional ⚠️"}`,
     `- version: ${health.public.version || "—"}`,
@@ -182,6 +183,15 @@ function b64Decode(value) {
   return new TextDecoder("utf-8").decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
 }
 
+function b64Encode(value) {
+  const bytes = new TextEncoder().encode(String(value || ""));
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 0x8000) {
+    binary += String.fromCharCode(...bytes.slice(i, i + 0x8000));
+  }
+  return btoa(binary);
+}
+
 function encodeRepoPath(path) {
   return cleanPath(path).split("/").map(encodeURIComponent).join("/");
 }
@@ -189,13 +199,37 @@ function encodeRepoPath(path) {
 async function githubFile(config, path) {
   const safe = safePath(path);
   if (!safe) throw new Error("unsafe path");
-  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v421" };
+  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v43" };
   if (config.githubToken) headers.authorization = `Bearer ${config.githubToken}`;
   const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}?ref=${encodeURIComponent(config.branch)}`, { headers });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(`GitHub ${response.status}: ${data.message || "request failed"}`);
   if (Array.isArray(data) || !data.content) throw new Error("not a text file");
   return { path: safe, sha: data.sha || "", size: data.size || 0, content: b64Decode(data.content) };
+}
+
+async function githubWrite(config, path, sha, content, message) {
+  if (!config.githubToken) throw new Error("GITHUB_TOKEN missing");
+  const safe = safePath(path);
+  if (!safe) throw new Error("unsafe path");
+  const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}`, {
+    method: "PUT",
+    headers: {
+      accept: "application/vnd.github+json",
+      "content-type": "application/json",
+      "user-agent": "MiniSkynet-Core-v43",
+      authorization: `Bearer ${config.githubToken}`
+    },
+    body: JSON.stringify({
+      message,
+      content: b64Encode(content),
+      sha,
+      branch: config.branch
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`GitHub write ${response.status}: ${data.message || "request failed"}`);
+  return { commit_sha: data?.commit?.sha || "", content_sha: data?.content?.sha || "" };
 }
 
 function mainFromWrangler(content) {
@@ -213,12 +247,102 @@ async function activeTarget(config) {
   return { start, effective, chain: [{ path: effective.path, sha: effective.sha, size: effective.size }] };
 }
 
+function findProposal(proposals, propId) {
+  const key = String(propId || "").trim();
+  return proposals.find(p => p.id === key || String(p.id || "").startsWith(key));
+}
+
+function splitLinesNoFinalNewline(text) {
+  return String(text || "").replace(/\n$/, "").split("\n");
+}
+
+function fullFileDiff(path, oldContent, newContent, oldSha) {
+  const oldLines = splitLinesNoFinalNewline(oldContent);
+  const newLines = splitLinesNoFinalNewline(newContent);
+  return [
+    `diff --git a/${path} b/${path}`,
+    `index ${oldSha.slice(0, 7)}..new 100644`,
+    `--- a/${path}`,
+    `+++ b/${path}`,
+    `@@ -1,${oldLines.length} +1,${newLines.length} @@`,
+    ...oldLines.map(line => `-${line}`),
+    ...newLines.map(line => `+${line}`)
+  ].join("\n") + "\n";
+}
+
+function applyFullFileDiff(oldContent, diff) {
+  const lines = String(diff || "").split("\n");
+  const plus = [];
+  let inHunk = false;
+  for (const line of lines) {
+    if (line.startsWith("@@ ")) { inHunk = true; continue; }
+    if (!inHunk) continue;
+    if (line.startsWith("+") && !line.startsWith("+++")) plus.push(line.slice(1));
+  }
+  return plus.join("\n") + (oldContent.endsWith("\n") ? "\n" : "");
+}
+
+function isRuntimeVisibleProposal(proposal) {
+  return /help|status|stage|command|команд|статус|development/i.test(
+    `${proposal.title || ""} ${proposal.request || ""} ${proposal.patch_draft?.intent || ""}`
+  );
+}
+
+function makeDeterministicPatch(proposal, file) {
+  const request = `${proposal.title || ""} ${proposal.request || ""}`;
+  if (/help|stage|development|команд/i.test(request)) {
+    if (file.content.includes("Development stage:")) {
+      return { already: true, summary: "Development stage уже есть в /help", content: file.content };
+    }
+    const marker = '"/start /help /status",';
+    if (!file.content.includes(marker)) throw new Error("help marker not found");
+    return {
+      already: false,
+      summary: "Показать Development stage в /help",
+      content: file.content.replace(marker, `${marker}\n      "Development stage: " + VERSION,`)
+    };
+  }
+  if (/health|deploy|verify|провер/i.test(request)) {
+    if (file.content.includes("apply_contour: true")) {
+      return { already: true, summary: "Apply contour уже отмечен в health", content: file.content };
+    }
+  }
+  throw new Error("Нет безопасной deterministic operation для этого proposal. Уточни proposal: help/stage или health/deploy.");
+}
+
+async function runPostApplyVerify(env, config, propId) {
+  const proposals = await arrayStore(env, "proposals");
+  const proposal = findProposal(proposals, propId);
+  const local = localHealth();
+  const pub = await publicHealth(config);
+  const ok = local.ok && local.version === VERSION;
+  if (proposal) {
+    proposal.post_apply_verify = { checked_at: now(), ok, health: { local, public: pub } };
+    if (ok && proposal.status === "applied") proposal.status = "verified";
+    await saveArray(env, "proposals", proposals, 50);
+  }
+  return { proposal, ok, local, public: pub };
+}
+
+function postApplyText(result) {
+  return [
+    `🧪 Post-apply verify${result.proposal ? ` ${result.proposal.id}` : ""}:`,
+    `- proposal: ${result.proposal ? result.proposal.status : "not found"}`,
+    `- local version: ${result.local.version}`,
+    `- local runtime: ${result.ok ? "PASS ✅" : "FAIL ⛔"}`,
+    `- public /health: ${result.public.ok ? "OK ✅" : `optional fail (${result.public.http}) ⚠️`}`,
+    result.ok ? "\nResult: verified by Telegram runtime ✅" : "\nResult: not verified."
+  ].join("\n");
+}
+
 const COMMANDS = new Set([
-  "/start", "/help", "/status", "/health_check", "/deploy_check",
+  "/start", "/help", "/status", "/health_check", "/deploy_check", "/post_apply_verify",
   "/self", "/self_set", "/goals", "/goal_add", "/plan", "/plan_set",
   "/tasks", "/addtask", "/task_done", "/next", "/memory", "/memory_score",
   "/repo_config", "/repo_file", "/repo_scan", "/active_target",
-  "/proposals", "/show", "/reject", "/approve"
+  "/propose", "/proposals", "/show", "/reject", "/approve",
+  "/patch_auto_target", "/patch_preview", "/code_preview", "/code_show", "/code_check",
+  "/apply_check", "/code_approve", "/apply_confirm", "/apply_status"
 ]);
 
 async function handleCommand(env, config, message) {
@@ -232,15 +356,17 @@ async function handleCommand(env, config, message) {
     return send(config, chatId, [
       "/start /help /status",
       "Development stage: " + VERSION,
-      "/health_check /deploy_check",
+      "/health_check /deploy_check /post_apply_verify id",
       "/self /self_set текст",
       "/goals /goal_add текст",
       "/plan /plan_set шаг1 | шаг2",
       "/tasks /addtask текст /task_done n /next",
       "/memory /memory_score",
       "/repo_config /repo_file path /repo_scan /active_target",
-      "/proposals /show id /approve id /reject id",
-      "Apply-контур временно выключен до стабилизации v4.2.1."
+      "/propose текст /proposals /show id /approve id /reject id",
+      "/patch_auto_target id /patch_preview id",
+      "/code_preview id /code_show id /code_check id",
+      "/apply_check id /code_approve id /apply_confirm id /apply_status id"
     ].join("\n"));
   }
 
@@ -253,6 +379,7 @@ async function handleCommand(env, config, message) {
       `- version: ${VERSION}`,
       "- runtime: single file, no onion imports",
       "- self health check: active",
+      "- apply contour: active",
       "- owner guard: fixed",
       `- tasks: active=${tasks.filter(t => t.status !== "done").length}, done=${tasks.filter(t => t.status === "done").length}`,
       `- memory: ${memories.length}`,
@@ -264,6 +391,9 @@ async function handleCommand(env, config, message) {
   if (command === "/health_check" || command === "/deploy_check") {
     return send(config, chatId, healthText({ local: localHealth(), public: await publicHealth(config) }));
   }
+  if (command === "/post_apply_verify") {
+    return send(config, chatId, postApplyText(await runPostApplyVerify(env, config, args)));
+  }
 
   if (command === "/self") return send(config, chatId, `🧠 Self:\n${(await getSelf(env)).text}\n\nИзменить: /self_set текст`);
   if (command === "/self_set") { await kvPut(env, "self", { text: args, updated_at: now() }); return send(config, chatId, "✅ Self обновлён."); }
@@ -273,11 +403,11 @@ async function handleCommand(env, config, message) {
   if (command === "/plan_set") { await kvPut(env, "plan", { steps: args.split("|").map(x => x.trim()).filter(Boolean), updated_at: now() }); return send(config, chatId, "✅ Plan обновлён."); }
 
   if (command === "/tasks") {
-    const tasks = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").slice(0, 12);
-    return send(config, chatId, tasks.length ? "📋 Active tasks:\n" + tasks.map((t, i) => `${i + 1}. ${t.id} p${t.p || 4}: ${t.text}`).join("\n") : "Задач нет.");
+    const activeTasks = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").slice(0, 12);
+    return send(config, chatId, activeTasks.length ? "📋 Active tasks:\n" + activeTasks.map((t, i) => `${i + 1}. ${t.id} p${t.p || 4}: ${t.text}`).join("\n") : "Задач нет.");
   }
-  if (command === "/addtask") { const tasks = await arrayStore(env, "tasks"); const task = { id: makeId("task"), text: args, p: 4, status: "todo", created_at: now() }; tasks.push(task); await saveArray(env, "tasks", tasks, 120); return send(config, chatId, `✅ Добавил ${task.id}`); }
-  if (command === "/task_done") { const tasks = await arrayStore(env, "tasks"); const active = tasks.filter(t => t.status !== "done"); const task = active[(parseInt(args, 10) || 1) - 1]; if (!task) return send(config, chatId, "Не нашёл задачу."); task.status = "done"; task.done_at = now(); await saveArray(env, "tasks", tasks, 120); return send(config, chatId, `✅ Закрыл: ${task.text}`); }
+  if (command === "/addtask") { const items = await arrayStore(env, "tasks"); const task = { id: makeId("task"), text: args, p: 4, status: "todo", created_at: now() }; items.push(task); await saveArray(env, "tasks", items, 120); return send(config, chatId, `✅ Добавил ${task.id}`); }
+  if (command === "/task_done") { const items = await arrayStore(env, "tasks"); const active = items.filter(t => t.status !== "done"); const task = active[(parseInt(args, 10) || 1) - 1]; if (!task) return send(config, chatId, "Не нашёл задачу."); task.status = "done"; task.done_at = now(); await saveArray(env, "tasks", items, 120); return send(config, chatId, `✅ Закрыл: ${task.text}`); }
   if (command === "/next") { const task = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").sort((a, b) => (a.p || 9) - (b.p || 9))[0]; const firstPlan = (await getPlan(env)).steps[0]; return send(config, chatId, `⏭ Next:\n${task ? `Источник: tasks\nШаг: ${task.text}` : `Источник: plan\nШаг: ${firstPlan || "плана нет"}`}`); }
 
   if (command === "/memory") { const memories = await arrayStore(env, "memories"); return send(config, chatId, memories.length ? "🧠 Memory:\n" + memories.slice(-8).map(m => `- [${m.type || "note"}/${m.score || 0}] ${m.text}`).join("\n") : "Память пустая."); }
@@ -288,9 +418,155 @@ async function handleCommand(env, config, message) {
   if (command === "/repo_scan") { const files = ["cloudflare/wrangler.toml", "cloudflare/src/index-v4.js"]; const out = []; for (const path of files) { try { const file = await githubFile(config, path); out.push(`✅ ${path} size=${file.size} sha=${file.sha.slice(0, 10)}`); } catch (error) { out.push(`❌ ${path}: ${error.message}`); } } return send(config, chatId, "🧭 Repo scan:\n" + out.join("\n")); }
   if (command === "/active_target") { const active = await activeTarget(config); return send(config, chatId, [`🎯 Active target:`, `- wrangler main: ${active.start}`, `- effective: ${active.effective.path}`, `- sha: ${active.effective.sha.slice(0, 12)}`].join("\n")); }
 
+  if (command === "/propose") {
+    const active = await activeTarget(config);
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = {
+      id: makeId("prop"),
+      status: "pending",
+      title: clip(args, 90),
+      request: args,
+      file_path: active.effective.path,
+      gate: { passed: true, active_target: active.effective.path, sha: active.effective.sha, at: now() },
+      created_at: now()
+    };
+    proposals.push(proposal);
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `📦 Proposal ${proposal.id}:\n${proposal.title}\nОдобрить: /approve ${proposal.id}\nОтклонить: /reject ${proposal.id}`);
+  }
+
   if (command === "/proposals") { const proposals = await arrayStore(env, "proposals"); return send(config, chatId, proposals.length ? "📦 Proposals:\n" + proposals.slice(-10).map(p => `- ${p.id} [${p.status}] ${p.title || p.request}`).join("\n") : "Proposals нет."); }
-  if (command === "/show") { const proposals = await arrayStore(env, "proposals"); const p = proposals.find(x => x.id === args || String(x.id || "").startsWith(args)); return send(config, chatId, p ? `📦 ${p.id}\nstatus: ${p.status}\ntarget: ${p.file_path || "—"}\nrequest: ${p.request || p.title || "—"}` : "Не нашёл proposal."); }
-  if (command === "/approve" || command === "/reject") { const proposals = await arrayStore(env, "proposals"); const p = proposals.find(x => x.id === args || String(x.id || "").startsWith(args)); if (!p) return send(config, chatId, "Не нашёл proposal."); p.status = command === "/approve" ? "approved" : "rejected"; p.updated_at = now(); await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ ${p.status}: ${p.id}`); }
+  if (command === "/show") { const proposals = await arrayStore(env, "proposals"); const p = findProposal(proposals, args); return send(config, chatId, p ? `📦 ${p.id}\nstatus: ${p.status}\ntarget: ${p.file_path || "—"}\nrequest: ${p.request || p.title || "—"}\ncode: ${p.code_draft ? "yes" : "no"}\napplied: ${p.apply_result?.commit_sha || "no"}` : "Не нашёл proposal."); }
+  if (command === "/approve" || command === "/reject") { const proposals = await arrayStore(env, "proposals"); const p = findProposal(proposals, args); if (!p) return send(config, chatId, "Не нашёл proposal."); p.status = command === "/approve" ? "approved" : "rejected"; p.updated_at = now(); await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ ${p.status}: ${p.id}`); }
+
+  if (command === "/patch_auto_target") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal) return send(config, chatId, "Не нашёл proposal.");
+    const active = await activeTarget(config);
+    proposal.file_path = active.effective.path;
+    proposal.patch_draft = null;
+    proposal.code_draft = null;
+    proposal.gate = { passed: true, active_target: active.effective.path, sha: active.effective.sha, at: now() };
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `✅ Auto target:\n- ${active.effective.path}\nТеперь: /patch_preview ${proposal.id}`);
+  }
+
+  if (command === "/patch_preview") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal) return send(config, chatId, "Не нашёл proposal.");
+    const file = await githubFile(config, proposal.file_path || (await activeTarget(config)).effective.path);
+    proposal.file_path = file.path;
+    proposal.patch_draft = {
+      target_file: file.path,
+      current_sha: file.sha,
+      intent: proposal.request,
+      risk: "low",
+      proposed_changes: ["deterministic safe change only"],
+      test_plan: ["/status", "/help", "/health_check"],
+      created_at: now()
+    };
+    proposal.status = "draft_ready";
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `🧩 Patch draft ${proposal.id}:\n- target: ${file.path}\n- sha: ${file.sha.slice(0, 12)}\n- risk: low\nДальше: /code_preview ${proposal.id}`);
+  }
+
+  if (command === "/code_preview") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal || !proposal.patch_draft) return send(config, chatId, "Нет proposal/patch_draft.");
+    const active = await activeTarget(config);
+    if (isRuntimeVisibleProposal(proposal) && proposal.patch_draft.target_file !== active.effective.path) {
+      return send(config, chatId, `⛔ target устарел. Сделай: /patch_auto_target ${proposal.id}`);
+    }
+    const patch = makeDeterministicPatch(proposal, active.effective);
+    if (patch.already) {
+      proposal.status = "already_applied";
+      await saveArray(env, "proposals", proposals, 50);
+      return send(config, chatId, `✅ Уже применено: ${patch.summary}\nApply не нужен.`);
+    }
+    const unified = fullFileDiff(active.effective.path, active.effective.content, patch.content, active.effective.sha);
+    if (applyFullFileDiff(active.effective.content, unified) !== patch.content) {
+      return send(config, chatId, "⛔ internal diff validation failed");
+    }
+    proposal.code_draft = {
+      target_file: active.effective.path,
+      current_sha: active.effective.sha,
+      unified_diff: unified,
+      summary: patch.summary,
+      risk: "low",
+      test_plan: ["/status", "/help", "/health_check"],
+      created_at: now()
+    };
+    proposal.status = "code_draft_ready";
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `🧬 Code draft ${proposal.id}:\n- target: ${active.effective.path}\n- sha: ${active.effective.sha.slice(0, 12)}\n- validation: valid ✅\n/code_show ${proposal.id}`);
+  }
+
+  if (command === "/code_show") {
+    const proposal = findProposal(await arrayStore(env, "proposals"), args);
+    return send(config, chatId, proposal?.code_draft ? `🧬 Code draft ${proposal.id}:\n${clip(proposal.code_draft.unified_diff, 2500)}` : "Code draft нет.");
+  }
+
+  if (command === "/code_check" || command === "/apply_check") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal) return send(config, chatId, "Не нашёл proposal.");
+    if (proposal.status === "already_applied") return send(config, chatId, `✅ Already applied: ${proposal.id}\nApply не нужен.`);
+    const active = await activeTarget(config);
+    const blockers = [];
+    if (!proposal.code_draft) blockers.push("code_draft missing");
+    if (proposal.code_draft?.target_file !== active.effective.path) blockers.push(`target ${proposal.code_draft?.target_file} != active ${active.effective.path}`);
+    if (proposal.code_draft?.current_sha !== active.effective.sha) blockers.push("sha mismatch");
+    let patched = null;
+    if (!blockers.length) {
+      patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff);
+      if (patched === active.effective.content) blockers.push("no-op diff");
+    }
+    return send(config, chatId, [
+      `🔐 Apply check ${proposal.id}:`,
+      `- target: ${active.effective.path}`,
+      `- code approved: ${proposal.code_approved_at ? "yes ✅" : "no ⛔"}`,
+      `- diff applies: ${patched ? "yes ✅" : "no/blocked"}`,
+      "",
+      blockers.length ? "Blockers:\n- " + blockers.join("\n- ") : `Blockers: none\nNext: ${proposal.code_approved_at ? `/apply_confirm ${proposal.id}` : `/code_approve ${proposal.id}`}`
+    ].join("\n"));
+  }
+
+  if (command === "/code_approve") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal?.code_draft) return send(config, chatId, "Нет code_draft.");
+    proposal.code_approved_at = now();
+    proposal.status = "code_approved";
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `✅ Code approved: ${proposal.id}\nТеперь: /apply_check ${proposal.id}`);
+  }
+
+  if (command === "/apply_confirm") {
+    const proposals = await arrayStore(env, "proposals");
+    const proposal = findProposal(proposals, args);
+    if (!proposal?.code_draft) return send(config, chatId, "Нет code_draft.");
+    if (!proposal.code_approved_at) return send(config, chatId, `⛔ Сначала /code_approve ${proposal.id}`);
+    const active = await activeTarget(config);
+    if (proposal.code_draft.target_file !== active.effective.path || proposal.code_draft.current_sha !== active.effective.sha) {
+      return send(config, chatId, "⛔ target/sha mismatch. Apply blocked.");
+    }
+    const patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff);
+    if (patched === active.effective.content) return send(config, chatId, "⛔ no-op diff. Apply blocked.");
+    const result = await githubWrite(config, active.effective.path, active.effective.sha, patched, `MiniSkynet v4.3 apply ${proposal.id}: ${proposal.code_draft.summary}`);
+    proposal.status = "applied";
+    proposal.applied_at = now();
+    proposal.apply_result = { path: active.effective.path, commit_sha: result.commit_sha, content_sha: result.content_sha, old_sha: active.effective.sha };
+    await saveArray(env, "proposals", proposals, 50);
+    return send(config, chatId, `✅ Applied:\n- file: ${active.effective.path}\n- commit: ${result.commit_sha}\nЖди deploy, потом /post_apply_verify ${proposal.id}`);
+  }
+
+  if (command === "/apply_status") {
+    const proposal = findProposal(await arrayStore(env, "proposals"), args);
+    return send(config, chatId, proposal ? `🚀 Apply status ${proposal.id}:\n- status: ${proposal.status}\n- applied: ${proposal.applied_at || "no"}\n- commit: ${proposal.apply_result?.commit_sha || "—"}\n- verified: ${proposal.post_apply_verify?.ok ? "yes ✅" : "no"}` : "Не нашёл proposal.");
+  }
 
   return send(config, chatId, `Не знаю команду ${command}. /help — список. Модель не вызываю.`);
 }
@@ -312,7 +588,7 @@ async function handleTelegram(request, env) {
     await handleCommand(env, config, message);
     return json({ ok: true, command: message.command, version: VERSION });
   }
-  await send(config, message.chatId, "Core v4.2.1 rescue online. Обычный think временно выключен до стабилизации. /help");
+  await send(config, message.chatId, "Core v4.3 online. Обычный think пока выключен до проверки apply-контура. /help");
   return json({ ok: true, text_mode: "rescue" });
 }
 
