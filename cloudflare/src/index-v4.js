@@ -1,4 +1,4 @@
-const VERSION = "v4.3-apply-contour-2026-07-03";
+const VERSION = "v4.4-self-apply-smoke-2026-07-03";
 const DEFAULT_WORKER_URL = "https://miniskynet-core.sromanuk16.workers.dev";
 const DEFAULT_REPO = "sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH = "main";
@@ -107,9 +107,9 @@ async function getGoals(env) {
 async function getPlan(env) {
   return await kvGet(env, "plan", {
     steps: [
-      "Проверить v4.3 apply contour",
-      "Создать маленький proposal",
-      "Проверить patch/code/apply chain",
+      "Проверить v4.4 self-apply smoke",
+      "Сделать маленький реальный self-apply через /apply_confirm",
+      "Проверить deploy через /post_apply_verify",
       "После стабильности вернуть обычный think"
     ],
     updated_at: now()
@@ -124,6 +124,7 @@ function localHealth() {
     onion_imports: false,
     self_health_check: true,
     apply_contour: true,
+    self_apply_smoke: true,
     owner_guard: "fixed"
   };
 }
@@ -159,12 +160,13 @@ async function publicHealth(config) {
 
 function healthText(health) {
   return [
-    "🩺 Health check v4.3:",
+    "🩺 Health check v4.4:",
     "Local Telegram runtime:",
     `- ok: ${health.local.ok ? "yes ✅" : "no ⛔"}`,
     `- version: ${health.local.version}`,
     `- flat_core: ${health.local.flat_core ? "yes ✅" : "no"}`,
     `- apply_contour: ${health.local.apply_contour ? "active ✅" : "off"}`,
+    `- self_apply_smoke: ${health.local.self_apply_smoke ? "active ✅" : "off"}`,
     `- owner_guard: ${health.local.owner_guard}`,
     "- deploy via Telegram webhook: verified ✅",
     "",
@@ -199,7 +201,7 @@ function encodeRepoPath(path) {
 async function githubFile(config, path) {
   const safe = safePath(path);
   if (!safe) throw new Error("unsafe path");
-  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v43" };
+  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v44" };
   if (config.githubToken) headers.authorization = `Bearer ${config.githubToken}`;
   const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}?ref=${encodeURIComponent(config.branch)}`, { headers });
   const data = await response.json().catch(() => ({}));
@@ -217,7 +219,7 @@ async function githubWrite(config, path, sha, content, message) {
     headers: {
       accept: "application/vnd.github+json",
       "content-type": "application/json",
-      "user-agent": "MiniSkynet-Core-v43",
+      "user-agent": "MiniSkynet-Core-v44",
       authorization: `Bearer ${config.githubToken}`
     },
     body: JSON.stringify({
@@ -283,13 +285,27 @@ function applyFullFileDiff(oldContent, diff) {
 }
 
 function isRuntimeVisibleProposal(proposal) {
-  return /help|status|stage|command|команд|статус|development/i.test(
+  return /help|status|stage|command|команд|статус|development|smoke|marker|маркер/i.test(
     `${proposal.title || ""} ${proposal.request || ""} ${proposal.patch_draft?.intent || ""}`
   );
 }
 
 function makeDeterministicPatch(proposal, file) {
   const request = `${proposal.title || ""} ${proposal.request || ""}`;
+
+  if (/smoke|marker|маркер|self.apply|self-apply|само/i.test(request)) {
+    if (file.content.includes("Self-apply smoke marker:")) {
+      return { already: true, summary: "Self-apply smoke marker уже есть в /help", content: file.content };
+    }
+    const marker = '"Development stage: " + VERSION,';
+    if (!file.content.includes(marker)) throw new Error("development stage marker not found");
+    return {
+      already: false,
+      summary: "Добавить self-apply smoke marker в /help",
+      content: file.content.replace(marker, `${marker}\n      "Self-apply smoke marker: " + VERSION,`)
+    };
+  }
+
   if (/help|stage|development|команд/i.test(request)) {
     if (file.content.includes("Development stage:")) {
       return { already: true, summary: "Development stage уже есть в /help", content: file.content };
@@ -302,12 +318,14 @@ function makeDeterministicPatch(proposal, file) {
       content: file.content.replace(marker, `${marker}\n      "Development stage: " + VERSION,`)
     };
   }
+
   if (/health|deploy|verify|провер/i.test(request)) {
     if (file.content.includes("apply_contour: true")) {
       return { already: true, summary: "Apply contour уже отмечен в health", content: file.content };
     }
   }
-  throw new Error("Нет безопасной deterministic operation для этого proposal. Уточни proposal: help/stage или health/deploy.");
+
+  throw new Error("Нет безопасной deterministic operation для этого proposal. Уточни proposal: help/stage или smoke marker.");
 }
 
 async function runPostApplyVerify(env, config, propId) {
@@ -371,7 +389,7 @@ async function handleCommand(env, config, message) {
   }
 
   if (command === "/status") {
-    const tasks = await arrayStore(env, "tasks");
+    const taskItems = await arrayStore(env, "tasks");
     const memories = await arrayStore(env, "memories");
     const proposals = await arrayStore(env, "proposals");
     return send(config, chatId, [
@@ -380,8 +398,9 @@ async function handleCommand(env, config, message) {
       "- runtime: single file, no onion imports",
       "- self health check: active",
       "- apply contour: active",
+      "- self-apply smoke: active",
       "- owner guard: fixed",
-      `- tasks: active=${tasks.filter(t => t.status !== "done").length}, done=${tasks.filter(t => t.status === "done").length}`,
+      `- tasks: active=${taskItems.filter(t => t.status !== "done").length}, done=${taskItems.filter(t => t.status === "done").length}`,
       `- memory: ${memories.length}`,
       `- proposals: ${proposals.length}`,
       `- model: ${config.model}`
@@ -391,6 +410,7 @@ async function handleCommand(env, config, message) {
   if (command === "/health_check" || command === "/deploy_check") {
     return send(config, chatId, healthText({ local: localHealth(), public: await publicHealth(config) }));
   }
+
   if (command === "/post_apply_verify") {
     return send(config, chatId, postApplyText(await runPostApplyVerify(env, config, args)));
   }
@@ -555,7 +575,7 @@ async function handleCommand(env, config, message) {
     }
     const patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff);
     if (patched === active.effective.content) return send(config, chatId, "⛔ no-op diff. Apply blocked.");
-    const result = await githubWrite(config, active.effective.path, active.effective.sha, patched, `MiniSkynet v4.3 apply ${proposal.id}: ${proposal.code_draft.summary}`);
+    const result = await githubWrite(config, active.effective.path, active.effective.sha, patched, `MiniSkynet v4.4 apply ${proposal.id}: ${proposal.code_draft.summary}`);
     proposal.status = "applied";
     proposal.applied_at = now();
     proposal.apply_result = { path: active.effective.path, commit_sha: result.commit_sha, content_sha: result.content_sha, old_sha: active.effective.sha };
@@ -588,7 +608,7 @@ async function handleTelegram(request, env) {
     await handleCommand(env, config, message);
     return json({ ok: true, command: message.command, version: VERSION });
   }
-  await send(config, message.chatId, "Core v4.3 online. Обычный think пока выключен до проверки apply-контура. /help");
+  await send(config, message.chatId, "Core v4.4 online. Обычный think пока выключен до проверки self-apply smoke. /help");
   return json({ ok: true, text_mode: "rescue" });
 }
 
