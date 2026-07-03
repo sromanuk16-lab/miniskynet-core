@@ -1,5 +1,5 @@
 name = "miniskynet-core"
-main = "src/index-v33.js"
+main = "src/index-v4.js"
 compatibility_date = "2026-07-01"
 workers_dev = true
 
