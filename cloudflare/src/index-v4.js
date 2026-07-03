@@ -1,5 +1,4 @@
-
-const VERSION="v5.1-think-dialog-2026-07-03";
+const VERSION="v5.1.1-think-dialog-hotfix-2026-07-03";
 const DEFAULT_REPO="sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH="main";
 const DEFAULT_WORKER_URL="https://miniskynet-core.sromanuk16.workers.dev";
@@ -13,7 +12,6 @@ const SELF_APPLY_MARKERS=[
   "proposal-specific verification",
   "v5 first clean self-apply marker",
 ];
-
 const CMDS=new Set(["/start","/help","/status","/self","/self_set","/goals","/goal_add","/plan","/plan_set","/tasks","/addtask","/task_done","/next","/memory","/memory_score","/think","/repo_config","/repo_file","/repo_scan","/active_target","/propose","/proposals","/show","/reject","/code_preview","/code_show","/apply_check","/apply_confirm","/apply_status","/post_apply_verify","/proposals_clean","/health_check","/deploy_check"]);
 
 const now=()=>new Date().toISOString();
@@ -30,158 +28,55 @@ function parse(update){
   let command=null,args="";
   if(text.startsWith("/")){
     const i=text.indexOf(" ");
-    command=(i<0?text:text.slice(0,i)).replace(/@\w+$/,").toLowerCase();
+    command=(i<0?text:text.slice(0,i)).replace(/@\w+$/," ").trim().toLowerCase();
     args=i<0?"":text.slice(i+1).trim();
   }
   return{chatId:m.chat?.id,userId:m.from?.id,text,command,args};
 }
-
 async function kvText(env,key){return String(await env.MINISKYNET_KV.get(key)||"").trim()}
 async function kvGet(env,key,fallback){const raw=await env.MINISKYNET_KV.get(key);if(!raw)return fallback;try{return JSON.parse(raw)}catch{return fallback}}
 async function kvPut(env,key,value){await env.MINISKYNET_KV.put(key,JSON.stringify(value,null,2))}
 async function arr(env,key){const v=await kvGet(env,key,{[key]:[]});return Array.isArray(v?.[key])?v[key]:[]}
 async function saveArr(env,key,items,limit=100){await kvPut(env,key,{[key]:items.slice(-limit)})}
-
-async function config(env){
-  return{
-    telegram:String(env.TELEGRAM_BOT_TOKEN||"").trim()||await kvText(env,"config:TELEGRAM_BOT_TOKEN"),
-    owner:String(env.TELEGRAM_ALLOWED_USER_ID||"").trim()||await kvText(env,"config:TELEGRAM_ALLOWED_USER_ID"),
-    openrouter:String(env.OPENROUTER_API_KEY||"").trim()||await kvText(env,"config:OPENROUTER_API_KEY"),
-    gh:String(env.GITHUB_TOKEN||"").trim()||await kvText(env,"config:GITHUB_TOKEN"),
-    repo:String(env.GITHUB_REPO||"").trim()||await kvText(env,"config:GITHUB_REPO")||DEFAULT_REPO,
-    branch:String(env.GITHUB_BRANCH||"").trim()||await kvText(env,"config:GITHUB_BRANCH")||DEFAULT_BRANCH,
-    worker:String(env.WORKER_URL||"").trim()||await kvText(env,"config:WORKER_URL")||DEFAULT_WORKER_URL,
-    model:String(env.OPENROUTER_MODEL_CHEAP||"").trim()||await kvText(env,"config:OPENROUTER_MODEL_CHEAP")||"openai/gpt-4o-mini"
-  };
-}
+async function cfg(env){return{
+  telegram:String(env.TELEGRAM_BOT_TOKEN||"").trim()||await kvText(env,"config:TELEGRAM_BOT_TOKEN"),
+  owner:String(env.TELEGRAM_ALLOWED_USER_ID||"").trim()||await kvText(env,"config:TELEGRAM_ALLOWED_USER_ID"),
+  openrouter:String(env.OPENROUTER_API_KEY||"").trim()||await kvText(env,"config:OPENROUTER_API_KEY"),
+  gh:String(env.GITHUB_TOKEN||"").trim()||await kvText(env,"config:GITHUB_TOKEN"),
+  repo:String(env.GITHUB_REPO||"").trim()||await kvText(env,"config:GITHUB_REPO")||DEFAULT_REPO,
+  branch:String(env.GITHUB_BRANCH||"").trim()||await kvText(env,"config:GITHUB_BRANCH")||DEFAULT_BRANCH,
+  worker:String(env.WORKER_URL||"").trim()||await kvText(env,"config:WORKER_URL")||DEFAULT_WORKER_URL,
+  model:String(env.OPENROUTER_MODEL_CHEAP||"").trim()||await kvText(env,"config:OPENROUTER_MODEL_CHEAP")||"openai/gpt-4o-mini"
+}}
 function ownerOk(c,userId){return!c.owner||String(userId||"")===String(c.owner)}
-async function tg(c,method,body){
-  if(!c.telegram)throw new Error("TELEGRAM_BOT_TOKEN missing");
-  const r=await fetch(`https://api.telegram.org/bot${c.telegram}/${method}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});
-  return r.json().catch(()=>({}));
-}
+async function tg(c,method,body){if(!c.telegram)throw new Error("TELEGRAM_BOT_TOKEN missing");const r=await fetch(`https://api.telegram.org/bot${c.telegram}/${method}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(body)});return r.json().catch(()=>({}))}
 async function send(c,chatId,text){if(chatId)await tg(c,"sendMessage",{chat_id:chatId,text:clip(text)})}
-
 const b64d=x=>new TextDecoder("utf-8").decode(Uint8Array.from(atob(String(x||"").replace(/\n/g,"")),ch=>ch.charCodeAt(0)));
 function b64e(x){const b=new TextEncoder().encode(String(x||""));let s="";for(let i=0;i<b.length;i+=0x8000)s+=String.fromCharCode(...b.slice(i,i+0x8000));return btoa(s)}
 const pathUrl=p=>clean(p).split("/").map(encodeURIComponent).join("/");
-
-async function readFile(c,path){
-  const p=safe(path);if(!p)throw new Error("unsafe path");
-  const headers={accept:"application/vnd.github+json","user-agent":"MiniSkynet-v51"};
-  if(c.gh)headers.authorization=`Bearer ${c.gh}`;
-  const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}?ref=${encodeURIComponent(c.branch)}`,{headers});
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(`GitHub ${r.status}: ${d.message||"request failed"}`);
-  if(Array.isArray(d)||!d.content)throw new Error("not a text file");
-  return{path:p,sha:d.sha||"",size:d.size||0,content:b64d(d.content)};
-}
-async function writeFile(c,path,sha,content,message){
-  if(!c.gh)throw new Error("GITHUB_TOKEN missing");
-  const p=safe(path);if(!p)throw new Error("unsafe path");
-  const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}`,{method:"PUT",headers:{accept:"application/vnd.github+json","content-type":"application/json","user-agent":"MiniSkynet-v51",authorization:`Bearer ${c.gh}`},body:JSON.stringify({message,content:b64e(content),sha,branch:c.branch})});
-  const d=await r.json().catch(()=>({}));
-  if(!r.ok)throw new Error(`GitHub write ${r.status}: ${d.message||"request failed"}`);
-  return{commit_sha:d?.commit?.sha||"",content_sha:d?.content?.sha||""};
-}
+async function readFile(c,path){const p=safe(path);if(!p)throw new Error("unsafe path");const headers={accept:"application/vnd.github+json","user-agent":"MiniSkynet-v511"};if(c.gh)headers.authorization=`Bearer ${c.gh}`;const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}?ref=${encodeURIComponent(c.branch)}`,{headers});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(`GitHub ${r.status}: ${d.message||"request failed"}`);if(Array.isArray(d)||!d.content)throw new Error("not a text file");return{path:p,sha:d.sha||"",size:d.size||0,content:b64d(d.content)}}
+async function writeFile(c,path,sha,content,message){if(!c.gh)throw new Error("GITHUB_TOKEN missing");const p=safe(path);if(!p)throw new Error("unsafe path");const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}`,{method:"PUT",headers:{accept:"application/vnd.github+json","content-type":"application/json","user-agent":"MiniSkynet-v511",authorization:`Bearer ${c.gh}`},body:JSON.stringify({message,content:b64e(content),sha,branch:c.branch})});const d=await r.json().catch(()=>({}));if(!r.ok)throw new Error(`GitHub write ${r.status}: ${d.message||"request failed"}`);return{commit_sha:d?.commit?.sha||"",content_sha:d?.content?.sha||""}}
 function mainFromWrangler(s){const m=String(s||"").match(/^main\s*=\s*["']([^"']+)["']/m);if(!m)return null;const rel=clean(m[1]);return rel.startsWith("cloudflare/")?rel:`cloudflare/${rel}`}
 async function activeTarget(c){const wr=await readFile(c,"cloudflare/wrangler.toml");const main=mainFromWrangler(wr.content);if(!main)throw new Error("wrangler main not found");return{main,file:await readFile(c,main)}}
 function findProp(list,key){const k=String(key||"").trim();return list.find(p=>p.id===k||String(p.id||"").startsWith(k))}
-
 function health(){return{ok:true,version:VERSION,core:"v5-clean",runtime:"single-file",onion_imports:false,proposal_fsm:true,github_write:"confirm-only",verification:"proposal-specific",think_dialog:true,markers:SELF_APPLY_MARKERS}}
-function help(){
-  return["/start /help /status",`Version: ${VERSION}`,"","Core:","/self /self_set текст","/goals /goal_add текст","/plan /plan_set шаг1 | шаг2","/tasks /addtask текст /task_done n /next","/memory /memory_score","/think текст","обычный текст = live dialog через think","","Repo:","/repo_config /repo_file path /repo_scan /active_target","","Self-apply:","/propose текст — сам готовит draft/check","/apply_confirm id — единственная команда записи в GitHub","/post_apply_verify id — проверяет конкретный результат","/proposals /show id /reject id /proposals_clean","/code_preview id /code_show id /apply_check id /apply_status id","","Markers:",...SELF_APPLY_MARKERS.map(x=>`- marker: ${x}`)].join("\n");
-}
-
+function help(){return["/start /help /status",`Version: ${VERSION}`,"","Core:","/self /self_set текст","/goals /goal_add текст","/plan /plan_set шаг1 | шаг2","/tasks /addtask текст /task_done n /next","/memory /memory_score","/think текст","обычный текст = live dialog через think","","Repo:","/repo_config /repo_file path /repo_scan /active_target","","Self-apply:","/propose текст — сам готовит draft/check","/apply_confirm id — единственная команда записи в GitHub","/post_apply_verify id — проверяет конкретный результат","/proposals /show id /reject id /proposals_clean","/code_preview id /code_show id /apply_check id /apply_status id","","Markers:",...SELF_APPLY_MARKERS.map(x=>`- marker: ${x}`)].join("\n")}
 async function getSelf(env){return kvGet(env,"self",{text:"Я MiniSkynet Core v5 — личный инженерный агент Сергея. Читаю repo перед изменениями и пишу в GitHub только после /apply_confirm.",updated_at:now()})}
 async function getGoals(env){return kvGet(env,"goals",{goals:["Быть личным инженерным агентом Сергея","Понимать обычный диалог","Читать repo перед изменениями","Делать proposal → draft → apply → verify","Не возвращаться к onion/layer hell"],updated_at:now()})}
 async function getPlan(env){return kvGet(env,"plan",{steps:["Проверить Core v5.1 think/dialog","Сохранять только полезную память","Расширять реальные инженерные действия"],updated_at:now()})}
-
-function memoryQuality(text){
-  const t=String(text||"").trim();
-  if(t.length<12)return 0;
-  if(/^(ок|да|нет|делай|дальше|спасибо|понял)$/i.test(t))return 0;
-  let score=40;
-  if(/запомни|важно|правило|цель|план|проект|архитект|огранич/i.test(t))score+=35;
-  if(t.length>80)score+=15;
-  return Math.min(100,score);
-}
-async function maybeRemember(env,userText,answer){
-  const score=memoryQuality(userText);
-  if(score<70)return null;
-  const mem=await arr(env,"memories");
-  const item={id:uid("mem"),type:/правило|запомни|важно/i.test(userText)?"rule":"note",score,text:clip(userText,300),answer_hint:clip(answer,180),created_at:now()};
-  mem.push(item);
-  await saveArr(env,"memories",mem,200);
-  return item;
-}
-async function runThink(env,c,userText){
-  if(!c.openrouter)return"⚠️ Think/dialog не включён: нет OPENROUTER_API_KEY в env или KV config:OPENROUTER_API_KEY.";
-  const self=await getSelf(env),goals=await getGoals(env),plan=await getPlan(env);
-  const mem=(await arr(env,"memories")).slice(-8).map(m=>`- [${m.type||"note"}/${m.score||0}] ${m.text}`).join("\n")||"- пусто";
-  const tasks=(await arr(env,"tasks")).filter(t=>t.status!=="done").slice(0,6).map(t=>`- ${t.text}`).join("\n")||"- нет";
-  const system=["Ты MiniSkynet Core v5.1, облачная Лондон Сергея в Telegram.","Пиши по-русски, коротко, живо, на ты.","Твоя роль: личный инженерный агент. Не болталка.","Не обещай запись в GitHub без /propose и /apply_confirm.","Если нужна правка кода — предложи одну безопасную следующую команду.","Если вопрос обычный — отвечай нормально без лишней схемы."].join("\n");
-  const context=[`Self: ${self.text}`,`Goals:\n${goals.goals.map((g,i)=>`${i+1}. ${g}`).join("\n")}`,`Plan:\n${plan.steps.map((s,i)=>`${i+1}. ${s}`).join("\n")}`,`Active tasks:\n${tasks}`,`Memory:\n${mem}`].join("\n\n");
-  const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json",authorization:`Bearer ${c.openrouter}`},body:JSON.stringify({model:c.model,messages:[{role:"system",content:system},{role:"user",content:`${context}\n\nСообщение Сергея:\n${userText}`}],max_tokens:650,temperature:0.4})});
-  const data=await r.json().catch(()=>({}));
-  if(!r.ok)return`OpenRouter error ${r.status}: ${data?.error?.message||"request failed"}`;
-  const answer=data?.choices?.[0]?.message?.content?.trim()||"Пустой ответ модели.";
-  await maybeRemember(env,userText,answer);
-  return answer;
-}
-
+function memoryQuality(text){const t=String(text||"").trim();if(t.length<12)return 0;if(/^(ок|да|нет|делай|дальше|спасибо|понял)$/i.test(t))return 0;let score=40;if(/запомни|важно|правило|цель|план|проект|архитект|огранич/i.test(t))score+=35;if(t.length>80)score+=15;return Math.min(100,score)}
+async function maybeRemember(env,userText,answer){const score=memoryQuality(userText);if(score<70)return null;const mem=await arr(env,"memories");const item={id:uid("mem"),type:/правило|запомни|важно/i.test(userText)?"rule":"note",score,text:clip(userText,300),answer_hint:clip(answer,180),created_at:now()};mem.push(item);await saveArr(env,"memories",mem,200);return item}
+async function runThink(env,c,userText){if(!c.openrouter)return"⚠️ Think/dialog не включён: нет OPENROUTER_API_KEY в env или KV config:OPENROUTER_API_KEY.";const self=await getSelf(env),goals=await getGoals(env),plan=await getPlan(env);const mem=(await arr(env,"memories")).slice(-8).map(m=>`- [${m.type||"note"}/${m.score||0}] ${m.text}`).join("\n")||"- пусто";const tasks=(await arr(env,"tasks")).filter(t=>t.status!=="done").slice(0,6).map(t=>`- ${t.text}`).join("\n")||"- нет";const system=["Ты MiniSkynet Core v5.1, облачная Лондон Сергея в Telegram.","Пиши по-русски, коротко, живо, на ты.","Твоя роль: личный инженерный агент. Не болталка.","Не обещай запись в GitHub без /propose и /apply_confirm.","Если нужна правка кода — предложи одну безопасную следующую команду.","Если вопрос обычный — отвечай нормально без лишней схемы."].join("\n");const context=[`Self: ${self.text}`,`Goals:\n${goals.goals.map((g,i)=>`${i+1}. ${g}`).join("\n")}`,`Plan:\n${plan.steps.map((s,i)=>`${i+1}. ${s}`).join("\n")}`,`Active tasks:\n${tasks}`,`Memory:\n${mem}`].join("\n\n");const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json",authorization:`Bearer ${c.openrouter}`},body:JSON.stringify({model:c.model,messages:[{role:"system",content:system},{role:"user",content:`${context}\n\nСообщение Сергея:\n${userText}`}],max_tokens:650,temperature:0.4})});const data=await r.json().catch(()=>({}));if(!r.ok)return`OpenRouter error ${r.status}: ${data?.error?.message||"request failed"}`;const answer=data?.choices?.[0]?.message?.content?.trim()||"Пустой ответ модели.";await maybeRemember(env,userText,answer);return answer}
 function markerRange(src){const start=src.indexOf("const SELF_APPLY_MARKERS=[");if(start<0)return null;const end=src.indexOf("];",start);return end>start?{start,end,block:src.slice(start,end+2)}:null}
 function hasMarker(src,marker){const r=markerRange(src);return!!(r&&r.block.includes(JSON.stringify(marker)))}
-function addMarker(src,marker){
-  const r=markerRange(src);if(!r)throw new Error("SELF_APPLY_MARKERS block not found");
-  if(hasMarker(src,marker))return{changed:false,content:src};
-  return{changed:true,content:src.slice(0,r.end)+`  ${JSON.stringify(marker)},\n`+src.slice(r.end)};
-}
-function markerFromRequest(req){
-  let t=String(req||"").trim().replace(/^добавить\s+/i,"").replace(/^add\s+/i,"").replace(/\s+в\s+help$/i,"").replace(/\s+in\s+help$/i,"").trim();
-  return(t||"custom marker").slice(0,90);
-}
-function planOp(req){
-  const t=String(req||"");
-  if(/marker|маркер|help|verify|pipeline|confirm|development|self/i.test(t)){
-    const marker=markerFromRequest(t);
-    return{type:"add_marker",marker,expected:`- marker: ${marker}`,summary:`Добавить marker в /help: ${marker}`};
-  }
-  return{type:"manual",summary:"Core v5 auto-apply сейчас безопасно умеет только help markers."};
-}
+function addMarker(src,marker){const r=markerRange(src);if(!r)throw new Error("SELF_APPLY_MARKERS block not found");if(hasMarker(src,marker))return{changed:false,content:src};return{changed:true,content:src.slice(0,r.end)+`  ${JSON.stringify(marker)},\n`+src.slice(r.end)}}
+function markerFromRequest(req){let t=String(req||"").trim().replace(/^добавить\s+/i,"").replace(/^add\s+/i,"").replace(/\s+в\s+help$/i,"").replace(/\s+in\s+help$/i,"").trim();return(t||"custom marker").slice(0,90)}
+function planOp(req){const t=String(req||"");if(/marker|маркер|help|verify|pipeline|confirm|development|self/i.test(t)){const marker=markerFromRequest(t);return{type:"add_marker",marker,expected:`- marker: ${marker}`,summary:`Добавить marker в /help: ${marker}`}}return{type:"manual",summary:"Core v5 auto-apply сейчас безопасно умеет только help markers."}}
 function sourceHelp(src){const r=markerRange(src);let markers=[];if(r)markers=[...r.block.matchAll(/"([^"]+)"/g)].map(m=>m[1]);return["Markers:",...markers.map(x=>`- marker: ${x}`)].join("\n")}
-function buildDraft(p,file){
-  const op=p.operation||planOp(p.request||p.title);
-  if(op.type!=="add_marker")return{ok:false,reason:op.summary};
-  const patch=addMarker(file.content,op.marker);
-  if(!patch.changed)return{ok:true,already:true,summary:`Marker уже есть: ${op.marker}`,op};
-  return{ok:true,already:false,op,draft:{target:file.path,sha:file.sha,new_content:patch.content,summary:op.summary,expected:op.expected,marker:op.marker,risk:"low",created_at:now()}};
-}
-async function prepare(c,p){
-  const a=await activeTarget(c);p.target_file=a.file.path;p.operation=planOp(p.request);p.repo_evidence={read_at:now(),path:a.file.path,sha:a.file.sha,size:a.file.size};
-  const d=buildDraft(p,a.file);
-  if(!d.ok){p.state="blocked";p.blocked_reason=d.reason;return{mode:"blocked",reason:d.reason}}
-  if(d.already){p.state="already_applied";p.marker=d.op.marker;p.expected=d.op.expected;return{mode:"already",summary:d.summary}}
-  p.state="ready_for_confirm";p.marker=d.draft.marker;p.expected=d.draft.expected;p.code_draft=d.draft;p.check={ok:true,rule:"deterministic_marker_add",checked_at:now()};
-  return{mode:"ready",draft:d.draft};
-}
-async function freshDraft(c,p){
-  const a=await activeTarget(c);
-  const stale=!p.code_draft||p.code_draft.target!==a.file.path||p.code_draft.sha!==a.file.sha;
-  if(!stale)return{active:a,rebuilt:false,already:false};
-  const d=buildDraft(p,a.file);
-  if(!d.ok){p.state="blocked";p.blocked_reason=d.reason;return{active:a,rebuilt:true,blocked:true,reason:d.reason}}
-  if(d.already){p.state="already_applied";p.marker=d.op.marker;p.expected=d.op.expected;return{active:a,rebuilt:true,already:true,summary:d.summary}}
-  p.state="ready_for_confirm";p.target_file=a.file.path;p.marker=d.draft.marker;p.expected=d.draft.expected;p.code_draft=d.draft;p.rebuilt_at=now();
-  return{active:a,rebuilt:true,already:false};
-}
-async function verify(c,p){
-  const a=await activeTarget(c);
-  const markerOk=p.marker?hasMarker(a.file.content,p.marker):false;
-  const helpOk=p.expected?sourceHelp(a.file.content).includes(p.expected):false;
-  return{ok:markerOk&&helpOk,marker_ok:markerOk,help_ok:helpOk,marker:p.marker||"",expected:p.expected||"",file:a.file.path,sha:a.file.sha,checked_at:now()};
-}
-
+function buildDraft(p,file){const op=p.operation||planOp(p.request||p.title);if(op.type!=="add_marker")return{ok:false,reason:op.summary};const patch=addMarker(file.content,op.marker);if(!patch.changed)return{ok:true,already:true,summary:`Marker уже есть: ${op.marker}`,op};return{ok:true,already:false,op,draft:{target:file.path,sha:file.sha,new_content:patch.content,summary:op.summary,expected:op.expected,marker:op.marker,risk:"low",created_at:now()}}}
+async function prepare(c,p){const a=await activeTarget(c);p.target_file=a.file.path;p.operation=planOp(p.request);p.repo_evidence={read_at:now(),path:a.file.path,sha:a.file.sha,size:a.file.size};const d=buildDraft(p,a.file);if(!d.ok){p.state="blocked";p.blocked_reason=d.reason;return{mode:"blocked",reason:d.reason}}if(d.already){p.state="already_applied";p.marker=d.op.marker;p.expected=d.op.expected;return{mode:"already",summary:d.summary}}p.state="ready_for_confirm";p.marker=d.draft.marker;p.expected=d.draft.expected;p.code_draft=d.draft;p.check={ok:true,rule:"deterministic_marker_add",checked_at:now()};return{mode:"ready",draft:d.draft}}
+async function freshDraft(c,p){const a=await activeTarget(c);const stale=!p.code_draft||p.code_draft.target!==a.file.path||p.code_draft.sha!==a.file.sha;if(!stale)return{active:a,rebuilt:false,already:false};const d=buildDraft(p,a.file);if(!d.ok){p.state="blocked";p.blocked_reason=d.reason;return{active:a,rebuilt:true,blocked:true,reason:d.reason}}if(d.already){p.state="already_applied";p.marker=d.op.marker;p.expected=d.op.expected;return{active:a,rebuilt:true,already:true,summary:d.summary}}p.state="ready_for_confirm";p.target_file=a.file.path;p.marker=d.draft.marker;p.expected=d.draft.expected;p.code_draft=d.draft;p.rebuilt_at=now();return{active:a,rebuilt:true,already:false}}
+async function verify(c,p){const a=await activeTarget(c);const markerOk=p.marker?hasMarker(a.file.content,p.marker):false;const helpOk=p.expected?sourceHelp(a.file.content).includes(p.expected):false;return{ok:markerOk&&helpOk,marker_ok:markerOk,help_ok:helpOk,marker:p.marker||"",expected:p.expected||"",file:a.file.path,sha:a.file.sha,checked_at:now()}}
 async function handle(env,c,m){
   const{chatId,command,args,text}=m;
   if(command==="/start")return send(c,chatId,`✅ MiniSkynet Core v5.1 online.\nversion: ${VERSION}\n/help — команды`);
@@ -217,28 +112,5 @@ async function handle(env,c,m){
   if(command==="/proposals_clean"){const props=await arr(env,"proposals"),keep=props.filter(p=>["ready_for_confirm","applied","verified"].includes(p.state)).slice(-30);await saveArr(env,"proposals",keep,80);return send(c,chatId,`🧹 Proposals cleaned: было ${props.length}, стало ${keep.length}`)}
   return send(c,chatId,`Не знаю команду ${command}. /help — список. Модель не вызываю.`);
 }
-
-async function telegram(request,env){
-  const c=await config(env);
-  const msg=parse(await request.json().catch(()=>null));
-  if(!msg)return out({ok:true});
-  if(!ownerOk(c,msg.userId)){await send(c,msg.chatId,"⛔ Доступ закрыт.");return out({ok:true,denied:true})}
-  try{
-    if(msg.command&&!CMDS.has(msg.command)){await send(c,msg.chatId,`Не знаю команду ${msg.command}. /help — список. Модель не вызываю.`);return out({ok:true,unknown_command:true,version:VERSION})}
-    await handle(env,c,msg);
-    return out({ok:true,command:msg.command||"text",version:VERSION});
-  }catch(e){
-    await send(c,msg.chatId,`❌ Core v5.1 error: ${clip(e.message||e,1000)}`);
-    return out({ok:false,error:String(e.message||e),version:VERSION},500);
-  }
-}
-
-export default{
-  async fetch(request,env){
-    const url=new URL(request.url);
-    if(url.pathname==="/"||url.pathname==="/health")return out(health());
-    if(url.pathname==="/telegram"&&request.method==="POST")return telegram(request,env);
-    return out({ok:false,error:"not found",version:VERSION},404);
-  },
-  async scheduled(){}
-};
+async function telegram(request,env){const c=await cfg(env);const msg=parse(await request.json().catch(()=>null));if(!msg)return out({ok:true});if(!ownerOk(c,msg.userId)){await send(c,msg.chatId,"⛔ Доступ закрыт.");return out({ok:true,denied:true})}try{if(msg.command&&!CMDS.has(msg.command)){await send(c,msg.chatId,`Не знаю команду ${msg.command}. /help — список. Модель не вызываю.`);return out({ok:true,unknown_command:true,version:VERSION})}await handle(env,c,msg);return out({ok:true,command:msg.command||"text",version:VERSION})}catch(e){await send(c,msg.chatId,`❌ Core v5.1 error: ${clip(e.message||e,1000)}`);return out({ok:false,error:String(e.message||e),version:VERSION},500)}}
+export default{async fetch(request,env){const url=new URL(request.url);if(url.pathname==="/"||url.pathname==="/health")return out(health());if(url.pathname==="/telegram"&&request.method==="POST")return telegram(request,env);return out({ok:false,error:"not found",version:VERSION},404)},async scheduled(){}};
