@@ -88,7 +88,8 @@ function helpHas(content, visible) { return helpBlock(content).includes(String(v
 function insertHelpLine(content, jsLine) {
   const visible = String(jsLine).match(/^"([^"]+)/)?.[1] || String(jsLine);
   if (helpHas(content, visible)) return content;
-  for (const anchor of ['      "/health_check /deploy_check /post_apply_verify id",', '      "/self /self_set текст",', '      "Development stage: " + VERSION,']) {
+  for (const anchor of ['      "Auto pipeline marker: " + VERSION,
+      "/health_check /deploy_check /post_apply_verify id",', '      "/self /self_set текст",', '      "Development stage: " + VERSION,']) {
     if (content.includes(anchor)) return content.replace(anchor, `      ${jsLine},\n${anchor}`);
   }
   const s = content.indexOf('if (command === "/help")'); const j = s >= 0 ? content.indexOf('    ].join("\\n"));', s) : -1;
