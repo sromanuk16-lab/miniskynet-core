@@ -1,31 +1,327 @@
-const VERSION="v4.2-self-health-check-2026-07-03";
-const REPO="sromanuk16-lab/miniskynet-core",BRANCH="main",WORKER="https://miniskynet-core.sromanuk16.workers.dev";
-const H={"content-type":"application/json; charset=utf-8"};
-const now=()=>new Date().toISOString(),clip=(s,n=3900)=>String(s??"").slice(0,n),rid=p=>`${p}_${crypto.randomUUID().slice(0,8)}`;
-const clean=p=>String(p||"").trim().replace(/^\/+/,""),safe=p=>{p=clean(p);return(!p||p.includes("..")||p.length>180||!/^[a-zA-Z0-9_./-]+$/.test(p))?null:p};
-const j=(d,s=200)=>new Response(JSON.stringify(d,null,2),{status:s,headers:H});
-function upd(u){const m=u?.message||u?.edited_message;if(!m)return null;const text=String(m.text||"").trim();let command=null,args="";if(text.startsWith("/")){const i=text.indexOf(" ");command=(i<0?text:text.slice(0,i)).replace(/@\w+$/,"").toLowerCase();args=i<0?"":text.slice(i+1).trim()}return{chatId:m.chat?.id,userId:m.from?.id,text,command,args}}
-async function kt(env,k){return String(await env.MINISKYNET_KV.get(k)||"").trim()}async function kg(env,k,f){const r=await env.MINISKYNET_KV.get(k);if(!r)return f;try{return JSON.parse(r)}catch{return f}}async function kp(env,k,v){await env.MINISKYNET_KV.put(k,JSON.stringify(v,null,2))}
-async function cfg(env){return{tg:String(env.TELEGRAM_BOT_TOKEN||"").trim()||await kt(env,"config:TELEGRAM_BOT_TOKEN"),owner:String(env.TELEGRAM_ALLOWED_USER_ID||"").trim()||await kt(env,"config:TELEGRAM_ALLOWED_USER_ID"),or:String(env.OPENROUTER_API_KEY||"").trim()||await kt(env,"config:OPENROUTER_API_KEY"),model:String(env.OPENROUTER_MODEL_CHEAP||"").trim()||await kt(env,"config:OPENROUTER_MODEL_CHEAP")||"openai/gpt-4o-mini",gh:String(env.GITHUB_TOKEN||"").trim()||await kt(env,"config:GITHUB_TOKEN"),repo:String(env.GITHUB_REPO||"").trim()||await kt(env,"config:GITHUB_REPO")||REPO,branch:String(env.GITHUB_BRANCH||"").trim()||await kt(env,"config:GITHUB_BRANCH")||BRANCH,worker:String(env.WORKER_URL||"").trim()||await kt(env,"config:WORKER_URL")||WORKER}}
-async function tg(c,m,b){return await(await fetch(`https://api.telegram.org/bot${c.tg}/${m}`,{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(b)})).json().catch(()=>({}))}async function send(c,id,t){if(c.tg&&id)await tg(c,"sendMessage",{chat_id:id,text:clip(t)})}
-async function arr(env,k){return(await kg(env,k,{[k]:[]}))[k]||[]}async function save(env,k,a,n=100){await kp(env,k,{[k]:a.slice(-n)})}
-const tasks=e=>arr(e,"tasks"),mem=e=>arr(e,"memories"),props=e=>arr(e,"proposals");
-async function self(env){return await kg(env,"self",{text:"Я MiniSkynet / облачная Лондон Сергея. Плоский Core v4: Telegram, Cloudflare Worker, KV, OpenRouter, GitHub. Работаю коротко, по-русски и через безопасный approve.",updated_at:now()})}
-async function goals(env){return await kg(env,"goals",{goals:["Быть личным инженерным агентом Сергея","Читать repo перед изменениями","Готовить patch только через approve","Не возвращаться к runtime-луковице"],updated_at:now()})}
-async function plan(env){return await kg(env,"plan",{steps:["Стабилизировать Core v4","Проверить self health","Проверить apply-контур","После этого включать safe alive loop"],updated_at:now()})}
-function b64d(s){const b=atob(String(s||"").replace(/\n/g,""));return new TextDecoder("utf-8").decode(Uint8Array.from(b,c=>c.charCodeAt(0)))}function b64e(s){const a=new TextEncoder().encode(String(s||""));let b="";for(let i=0;i<a.length;i+=0x8000)b+=String.fromCharCode(...a.slice(i,i+0x8000));return btoa(b)}
-const ep=p=>clean(p).split("/").map(encodeURIComponent).join("/");
-async function gf(c,path){const p=safe(path);if(!p)throw Error("unsafe path");const h={accept:"application/vnd.github+json","user-agent":"MiniSkynet-v42"};if(c.gh)h.authorization="Bearer "+c.gh;const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${ep(p)}?ref=${encodeURIComponent(c.branch)}`,{headers:h});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(`GitHub ${r.status}: ${d.message||"request failed"}`);if(Array.isArray(d)||!d.content)throw Error("not a text file");return{path:p,sha:d.sha||"",size:d.size||0,content:b64d(d.content)}}
-async function gw(c,path,sha,content,msg){if(!c.gh)throw Error("GITHUB_TOKEN missing");const p=safe(path);if(!p)throw Error("unsafe path");const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${ep(p)}`,{method:"PUT",headers:{accept:"application/vnd.github+json","content-type":"application/json","user-agent":"MiniSkynet-v42",authorization:"Bearer "+c.gh},body:JSON.stringify({message:msg,content:b64e(content),sha,branch:c.branch})});const d=await r.json().catch(()=>({}));if(!r.ok)throw Error(`GitHub write ${r.status}: ${d.message||"request failed"}`);return{commit_sha:d?.commit?.sha||"",content_sha:d?.content?.sha||""}}
-function main(s){const m=String(s||"").match(/^main\s*=\s*["']([^"']+)["']/m);if(!m)return null;const r=clean(m[1]);return r.startsWith("cloudflare/")?r:`cloudflare/${r}`}function fwd(f){const m=String(f.content||"").trim().match(/^export\s+\{\s*default\s*\}\s+from\s+["']\.\/([^"']+)["'];?$/);if(!m)return null;const a=clean(f.path).split("/");a.pop();return`${a.join("/")}/${clean(m[1])}`}
-async function active(c){const w=await gf(c,"cloudflare/wrangler.toml"),start=main(w.content);if(!start)throw Error("wrangler main not found");let path=start,chain=[];for(let i=0;i<8;i++){const f=await gf(c,path),n=fwd(f);chain.push({path:f.path,sha:f.sha,size:f.size,forward_to:n});if(!n)return{start,effective:f,chain};path=n}throw Error("active target chain too deep")}
-function localHealth(){return{ok:true,version:VERSION,flat_core:true,onion_imports:false,self_health_check:true}}
-async function publicHealth(c){const t=Date.now(),base=String(c.worker||WORKER).replace(/\/$/,"");try{const r=await fetch(`${base}/health?ts=${Date.now()}`,{headers:{"cache-control":"no-cache"}}),txt=await r.text();let d=null;try{d=JSON.parse(txt)}catch{}return{ok:r.ok&&!!d?.ok,http:r.status,url:`${base}/health`,version:d?.version||null,flat_core:!!d?.flat_core,ms:Date.now()-t}}catch(e){return{ok:false,http:0,url:`${base}/health`,version:null,flat_core:false,ms:Date.now()-t,error:String(e.message||e).slice(0,180)}}}
-async function health(c){return{local:localHealth(),public:await publicHealth(c)}}function healthTxt(h){const pm=h.public.version===VERSION;return["🩺 Health check v4.2:","Local Telegram runtime:",`- ok: ${h.local.ok?"yes ✅":"no ⛔"}`,`- version: ${h.local.version}`,`- flat_core: ${h.local.flat_core?"yes ✅":"no"}`,"- deploy via Telegram webhook: verified ✅","","Public /health route:",`- url: ${h.public.url}`,`- http: ${h.public.http}`,`- ok: ${h.public.ok?"yes ✅":"no ⚠️"}`,`- version: ${h.public.version||"—"}`,`- match: ${pm?"yes ✅":"no/optional ⚠️"}`,`- time: ${h.public.ms}ms`,"",h.public.ok?"Public health: OK ✅":"Public health optional failed; Telegram runtime still verified."].join("\n")}
-function findP(a,pid){const k=String(pid||"").trim();return a.find(p=>p.id===k||String(p.id||"").startsWith(k))}function lines(s){return String(s||"").replace(/\n$/,"").split("\n")}function diff(path,o,n,sha){const a=lines(o),b=lines(n);return[`diff --git a/${path} b/${path}`,`index ${sha.slice(0,7)}..new 100644`,`--- a/${path}`,`+++ b/${path}`,`@@ -1,${a.length} +1,${b.length} @@`,...a.map(x=>`-${x}`),...b.map(x=>`+${x}`)].join("\n")+"\n"}function apply(o,d){let plus=[],h=false;for(const l of String(d||"").split("\n")){if(l.startsWith("@@ ")){h=true;continue}if(!h)continue;if(l.startsWith("+")&&!l.startsWith("+++"))plus.push(l.slice(1))}return plus.join("\n")+(o.endsWith("\n")?"\n":"")}
-function helpStage(content){if(content.includes("Development stage:"))return{already:true,content};const m='"/start /help /status",';if(!content.includes(m))throw Error("help marker not found");return{already:false,content:content.replace(m,`${m}\n      "Development stage: " + VERSION,`)}}function runtimeVisible(p){return/help|status|stage|command|команд|статус|development/i.test(`${p.title||""} ${p.request||""} ${p.patch_draft?.intent||""}`)}
-async function think(c,env,text){if(!c.or)return{message:"OpenRouter ключ не найден. Могу работать командами.",usage:{}};const s=await self(env),g=await goals(env),pl=await plan(env),ts=(await tasks(env)).filter(t=>t.status!=="done").slice(0,5);const prompt=`Ты MiniSkynet Core v4. Отвечай коротко по-русски.\nSELF: ${s.text}\nGOALS: ${g.goals.join("; ")}\nPLAN: ${pl.steps.join("; ")}\nTASKS: ${ts.map(t=>t.text).join("; ")}\nUSER: ${text}\nВерни JSON {"message":"...","memory":"...","task":"..."}`;const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json",authorization:"Bearer "+c.or},body:JSON.stringify({model:c.model,temperature:.2,max_tokens:700,messages:[{role:"user",content:prompt}]})}),d=await r.json().catch(()=>({}));if(!r.ok)throw Error(`OpenRouter ${r.status}`);const raw=d?.choices?.[0]?.message?.content||"";let p=null;try{p=JSON.parse(raw)}catch{const a=raw.indexOf("{"),b=raw.lastIndexOf("}");if(a>=0&&b>a)try{p=JSON.parse(raw.slice(a,b+1))}catch{}}if(!p)p={message:raw};if(p.memory){const m=await mem(env);m.push({id:rid("mem"),type:"note",score:80,text:clip(p.memory,700),created_at:now()});await save(env,"memories",m,200)}if(p.task){const t=await tasks(env);t.push({id:rid("task"),text:clip(p.task,500),status:"todo",p:4,created_at:now()});await save(env,"tasks",t,120)}return{message:p.message||raw,usage:d.usage||{}}}
-const COMMANDS=new Set(["/start","/help","/status","/cost","/self","/self_set","/goals","/goal_add","/plan","/plan_set","/tasks","/addtask","/task_done","/next","/memory","/memory_score","/repo_config","/repo_file","/repo_scan","/active_target","/health_check","/deploy_check","/post_apply_verify","/propose","/proposals","/show","/approve","/reject","/patch_auto_target","/patch_preview","/code_preview","/code_show","/code_check","/apply_check","/code_approve","/apply_confirm","/apply_status"]);
-async function handle(env,c,m){const{chatId,command,args}=m;if(command==="/start")return send(c,chatId,`✅ MiniSkynet Core v4 проснулся.\nversion: ${VERSION}\n/help — команды`);if(command==="/help")return send(c,chatId,["/start /help /status","Development stage: "+VERSION,"/self /self_set текст","/goals /goal_add текст","/plan /plan_set шаг1 | шаг2","/tasks /addtask текст /task_done n /next","/memory /memory_score /cost","/repo_config /repo_file path /repo_scan /active_target","/health_check /deploy_check /post_apply_verify id","/propose текст /proposals /show id /approve id /reject id","/patch_auto_target id /patch_preview id","/code_preview id /code_show id /code_check id","/apply_check id /code_approve id /apply_confirm id /apply_status id"].join("\n"));if(command==="/status"){const t=await tasks(env),m2=await mem(env),p=await props(env);return send(c,chatId,["📡 MiniSkynet Core v4 status",`- version: ${VERSION}`,"- runtime: single file, no onion imports","- self health check: active",`- tasks: active=${t.filter(x=>x.status!=="done").length}, done=${t.filter(x=>x.status==="done").length}`,`- memory: ${m2.length}`,`- proposals: ${p.length}`,`- model: ${c.model}`].join("\n"))}if(command==="/health_check"||command==="/deploy_check")return send(c,chatId,healthTxt(await health(c)));if(command==="/post_apply_verify"){const ps=await props(env),p=findP(ps,args),h=await health(c),ok=h.local.ok&&h.local.version===VERSION;if(p){p.post_apply_verify={checked_at:now(),ok,health:h};if(ok&&p.status==="applied")p.status="verified";await save(env,"proposals",ps,50)}return send(c,chatId,[`🧪 Post-apply verify${p?` ${p.id}`:""}:`,`- proposal: ${p?p.status:"not found"}`,`- local version: ${h.local.version}`,`- local runtime: ${ok?"PASS ✅":"FAIL ⛔"}`,`- public /health: ${h.public.ok?"OK ✅":`optional fail (${h.public.http}) ⚠️`}`,ok?"\nResult: verified by Telegram runtime ✅":"\nResult: not verified."].join("\n"))}if(command==="/cost"){const st=await kg(env,"cost",{cycles:0,in:0,out:0});return send(c,chatId,`💸 CostGuard:\n- cycles: ${st.cycles||0}\n- tokens: in=${st.in||0}, out=${st.out||0}`)}if(command==="/self")return send(c,chatId,`🧠 Self:\n${(await self(env)).text}\n\nИзменить: /self_set текст`);if(command==="/self_set"){await kp(env,"self",{text:args,updated_at:now()});return send(c,chatId,"✅ Self обновлён.")}if(command==="/goals")return send(c,chatId,"🎯 Goals:\n"+(await goals(env)).goals.map((g,i)=>`${i+1}. ${g}`).join("\n"));if(command==="/goal_add"){const g=await goals(env);g.goals.push(args);g.updated_at=now();await kp(env,"goals",g);return send(c,chatId,"✅ Goal добавлена.")}if(command==="/plan")return send(c,chatId,"🗺 Plan:\n"+(await plan(env)).steps.map((s,i)=>`${i+1}. ${s}`).join("\n"));if(command==="/plan_set"){await kp(env,"plan",{steps:args.split("|").map(x=>x.trim()).filter(Boolean),updated_at:now()});return send(c,chatId,"✅ Plan обновлён.")}if(command==="/tasks"){const t=(await tasks(env)).filter(x=>x.status!=="done").slice(0,12);return send(c,chatId,t.length?"📋 Active tasks:\n"+t.map((x,i)=>`${i+1}. ${x.id} p${x.p||4}: ${x.text}`).join("\n"):"Задач нет.")}if(command==="/addtask"){const t=await tasks(env),it={id:rid("task"),text:args,p:4,status:"todo",created_at:now()};t.push(it);await save(env,"tasks",t,120);return send(c,chatId,`✅ Добавил ${it.id}`)}if(command==="/task_done"){const t=await tasks(env),a=t.filter(x=>x.status!=="done"),it=a[(parseInt(args,10)||1)-1];if(!it)return send(c,chatId,"Не нашёл задачу.");it.status="done";it.done_at=now();await save(env,"tasks",t,120);return send(c,chatId,`✅ Закрыл: ${it.text}`)}if(command==="/next"){const t=(await tasks(env)).filter(x=>x.status!=="done").sort((a,b)=>(a.p||9)-(b.p||9))[0],pl=(await plan(env)).steps[0];return send(c,chatId,`⏭ Next:\n${t?`Источник: tasks\nШаг: ${t.text}`:`Источник: plan\nШаг: ${pl||"плана нет"}`}`)}if(command==="/memory"){const m=await mem(env);return send(c,chatId,m.length?"🧠 Memory:\n"+m.slice(-8).map(x=>`- [${x.type||"note"}/${x.score||0}] ${x.text}`).join("\n"):"Память пустая.")}if(command==="/memory_score"){const m=await mem(env),avg=m.length?Math.round(m.reduce((a,b)=>a+(b.score||0),0)/m.length):0;return send(c,chatId,`🧠 Memory Quality:\n- всего: ${m.length}\n- avg: ${avg}/100`)}if(command==="/repo_config")return send(c,chatId,`🔎 Repo:\n- repo: ${c.repo}\n- branch: ${c.branch}\n- token: ${c.gh?"есть ✅":"нет ⛔"}\n- workerUrl: ${c.worker}`);if(command==="/repo_file"){const f=await gf(c,args);return send(c,chatId,`📄 ${f.path}\n- size: ${f.size}\n- sha: ${f.sha.slice(0,12)}\n\n${clip(f.content,1200)}`)}if(command==="/repo_scan"){const out=[];for(const p of["cloudflare/wrangler.toml","cloudflare/src/index-v4.js"]){try{const f=await gf(c,p);out.push(`✅ ${p} size=${f.size} sha=${f.sha.slice(0,10)}`)}catch(e){out.push(`❌ ${p}: ${e.message}`)}}return send(c,chatId,"🧭 Repo scan:\n"+out.join("\n"))}if(command==="/active_target"){const a=await active(c);return send(c,chatId,["🎯 Active target:",`- wrangler main: ${a.start}`,`- effective: ${a.effective.path}`,`- sha: ${a.effective.sha.slice(0,12)}`,"","Chain:",...a.chain.map((x,i)=>`${i+1}. ${x.path}${x.forward_to?` → ${x.forward_to}`:""}`)].join("\n"))}if(command==="/propose"){const a=await active(c),ps=await props(env),p={id:rid("prop"),status:"pending",request:args,title:clip(args,90),file_path:a.effective.path,checked_files:[a.effective.path],gate:{passed:true,active_target:a.effective.path,sha:a.effective.sha,at:now()},created_at:now()};ps.push(p);await save(env,"proposals",ps,50);return send(c,chatId,`📦 Proposal ${p.id}:\n${p.title}\nОдобрить: /approve ${p.id}\nОтклонить: /reject ${p.id}`)}if(command==="/proposals"){const ps=await props(env);return send(c,chatId,ps.length?"📦 Proposals:\n"+ps.slice(-10).map(p=>`- ${p.id} [${p.status}] ${p.title||p.request}`).join("\n"):"Proposals нет.")}if(command==="/show"){const p=findP(await props(env),args);return send(c,chatId,p?`📦 ${p.id}\nstatus: ${p.status}\ntarget: ${p.file_path}\nrequest: ${p.request}\ncode: ${p.code_draft?"yes":"no"}\napplied: ${p.apply_result?.commit_sha||"no"}\nverified: ${p.post_apply_verify?.ok?"yes":"no"}`:"Не нашёл proposal.")}if(command==="/approve"||command==="/reject"){const ps=await props(env),p=findP(ps,args);if(!p)return send(c,chatId,"Не нашёл proposal.");p.status=command==="/approve"?"approved":"rejected";p.updated_at=now();await save(env,"proposals",ps,50);return send(c,chatId,`✅ ${p.status}: ${p.id}`)}if(command==="/patch_auto_target"){const ps=await props(env),p=findP(ps,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const a=await active(c);p.file_path=a.effective.path;p.patch_draft=null;p.code_draft=null;await save(env,"proposals",ps,50);return send(c,chatId,`✅ Auto target:\n- ${a.effective.path}\nТеперь: /patch_preview ${p.id}`)}if(command==="/patch_preview"){const ps=await props(env),p=findP(ps,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const f=await gf(c,p.file_path);p.patch_draft={target_file:f.path,current_sha:f.sha,intent:p.request,risk:"low/medium",test_plan:["/status","/help"],created_at:now()};p.status="draft_ready";await save(env,"proposals",ps,50);return send(c,chatId,`🧩 Patch draft ${p.id}:\n- target: ${f.path}\n- sha: ${f.sha.slice(0,12)}\nДальше: /code_preview ${p.id}`)}if(command==="/code_preview"){const ps=await props(env),p=findP(ps,args);if(!p||!p.patch_draft)return send(c,chatId,"Нет proposal/patch_draft.");const a=await active(c);if(runtimeVisible(p)&&p.patch_draft.target_file!==a.effective.path)return send(c,chatId,`⛔ target устарел. Сделай: /patch_auto_target ${p.id}`);const made=helpStage(a.effective.content);if(made.already){p.status="already_applied";await save(env,"proposals",ps,50);return send(c,chatId,"✅ Уже применено: Development stage уже есть в активном файле.\nApply не нужен.")}const d=diff(a.effective.path,a.effective.content,made.content,a.effective.sha);if(apply(a.effective.content,d)!==made.content)return send(c,chatId,"⛔ internal diff validation failed");p.code_draft={target_file:a.effective.path,current_sha:a.effective.sha,unified_diff:d,summary:"Показать Development stage в /help",risk:"low",test_plan:["/status","/help"],created_at:now()};p.status="code_draft_ready";await save(env,"proposals",ps,50);return send(c,chatId,`🧬 Code draft ${p.id}:\n- target: ${a.effective.path}\n- validation: valid ✅\n/code_show ${p.id}`)}if(command==="/code_show"){const p=findP(await props(env),args);return send(c,chatId,p?.code_draft?`🧬 Code draft ${p.id}:\n${clip(p.code_draft.unified_diff,2500)}`:"Code draft нет.")}if(command==="/code_check"||command==="/apply_check"){const ps=await props(env),p=findP(ps,args);if(!p)return send(c,chatId,"Не нашёл proposal.");if(p.status==="already_applied")return send(c,chatId,`✅ Already applied: ${p.id}\nApply не нужен.`);const a=await active(c),b=[];if(!p.code_draft)b.push("code_draft missing");if(p.code_draft?.target_file!==a.effective.path)b.push(`target ${p.code_draft?.target_file} != active ${a.effective.path}`);if(p.code_draft?.current_sha!==a.effective.sha)b.push("sha mismatch");let patched=null;if(!b.length)patched=apply(a.effective.content,p.code_draft.unified_diff);return send(c,chatId,[`🔐 Apply check ${p.id}:`,`- target: ${a.effective.path}`,`- code approved: ${p.code_approved_at?"yes ✅":"no ⛔"}`,`- diff applies: ${patched?"yes ✅":"no/blocked"}`,"",b.length?"Blockers:\n- "+b.join("\n- "):`Blockers: none\nNext: ${p.code_approved_at?`/apply_confirm ${p.id}`:`/code_approve ${p.id}`}`].join("\n"))}if(command==="/code_approve"){const ps=await props(env),p=findP(ps,args);if(!p?.code_draft)return send(c,chatId,"Нет code_draft.");p.code_approved_at=now();p.status="code_approved";await save(env,"proposals",ps,50);return send(c,chatId,`✅ Code approved: ${p.id}\nТеперь: /apply_check ${p.id}`)}if(command==="/apply_confirm"){const ps=await props(env),p=findP(ps,args);if(!p?.code_draft)return send(c,chatId,"Нет code_draft.");if(!p.code_approved_at)return send(c,chatId,`⛔ Сначала /code_approve ${p.id}`);const a=await active(c);if(p.code_draft.target_file!==a.effective.path||p.code_draft.current_sha!==a.effective.sha)return send(c,chatId,"⛔ target/sha mismatch. Apply blocked.");const patched=apply(a.effective.content,p.code_draft.unified_diff),r=await gw(c,a.effective.path,a.effective.sha,patched,`MiniSkynet v4 apply ${p.id}: ${p.code_draft.summary}`);p.status="applied";p.applied_at=now();p.apply_result={path:a.effective.path,commit_sha:r.commit_sha,content_sha:r.content_sha,old_sha:a.effective.sha};await save(env,"proposals",ps,50);return send(c,chatId,`✅ Applied:\n- file: ${a.effective.path}\n- commit: ${r.commit_sha}\nЖди deploy, потом /post_apply_verify ${p.id}`)}if(command==="/apply_status"){const p=findP(await props(env),args);return send(c,chatId,p?`🚀 Apply status ${p.id}:\n- status: ${p.status}\n- applied: ${p.applied_at||"no"}\n- commit: ${p.apply_result?.commit_sha||"—"}\n- verified: ${p.post_apply_verify?.ok?"yes ✅":"no"}`:"Не нашёл proposal.")}return send(c,chatId,`Не знаю команду ${command}. /help — список. Модель не вызываю.`)}
-async function telegram(request,env,ctx){const c=await cfg(env),u=await request.json().catch(()=>null),m=upd(u);if(!m)return j({ok:true});if(!ownerOk(c,m.userId)){ctx.waitUntil(send(c,m.chatId,"⛔ Доступ закрыт."));return j({ok:true,denied:true})}if(m.command&&COMMANDS.has(m.command)){ctx.waitUntil(handle(env,c,m).catch(e=>send(c,m.chatId,`❌ v4 error: ${clip(e.message||e,900)}`)));return j({ok:true,command:m.command})}if(m.command){ctx.waitUntil(send(c,m.chatId,`Не знаю команду ${m.command}. /help — список. Модель не вызываю.`));return j({ok:true,unknown_command:true})}ctx.waitUntil(think(c,env,m.text).then(r=>send(c,m.chatId,`${r.message}\n\nusage: in=${r.usage?.prompt_tokens||0} out=${r.usage?.completion_tokens||0}`)).catch(e=>send(c,m.chatId,`❌ think error: ${clip(e.message||e,500)}`)));return j({ok:true,think:true})}
-export default{async fetch(request,env,ctx){const url=new URL(request.url);if(url.pathname==="/"||url.pathname==="/health")return j(localHealth());if(url.pathname==="/telegram"&&request.method==="POST")return telegram(request,env,ctx);return j({ok:false,error:"not found",version:VERSION},404)},async scheduled(event,env,ctx){const b=await kg(env,"brain",{alive_enabled:false});if(!b.alive_enabled||!b.owner_chat_id)return;const c=await cfg(env);await send(c,b.owner_chat_id,"⏱ Alive tick v4.2: жив, auto-development выключен до стабильной проверки.")}};
+const VERSION = "v4.2.1-owner-guard-fix-2026-07-03";
+const DEFAULT_WORKER_URL = "https://miniskynet-core.sromanuk16.workers.dev";
+const DEFAULT_REPO = "sromanuk16-lab/miniskynet-core";
+const DEFAULT_BRANCH = "main";
+const JSON_HEADERS = { "content-type": "application/json; charset=utf-8" };
+
+const now = () => new Date().toISOString();
+const clip = (value, limit = 3900) => String(value ?? "").slice(0, limit);
+const makeId = (prefix) => `${prefix}_${crypto.randomUUID().slice(0, 8)}`;
+const cleanPath = (path) => String(path || "").trim().replace(/^\/+/, "");
+const safePath = (path) => {
+  const p = cleanPath(path);
+  if (!p || p.includes("..") || p.length > 180) return null;
+  return /^[a-zA-Z0-9_./-]+$/.test(p) ? p : null;
+};
+
+function json(data, status = 200) {
+  return new Response(JSON.stringify(data, null, 2), { status, headers: JSON_HEADERS });
+}
+
+function parseUpdate(update) {
+  const message = update?.message || update?.edited_message || null;
+  if (!message) return null;
+  const text = String(message.text || "").trim();
+  let command = null;
+  let args = "";
+  if (text.startsWith("/")) {
+    const splitAt = text.indexOf(" ");
+    command = (splitAt === -1 ? text : text.slice(0, splitAt)).replace(/@\w+$/, "").toLowerCase();
+    args = splitAt === -1 ? "" : text.slice(splitAt + 1).trim();
+  }
+  return { chatId: message.chat?.id, userId: message.from?.id, text, command, args };
+}
+
+async function kvText(env, key) {
+  return String(await env.MINISKYNET_KV.get(key) || "").trim();
+}
+
+async function kvGet(env, key, fallback) {
+  const raw = await env.MINISKYNET_KV.get(key);
+  if (!raw) return fallback;
+  try { return JSON.parse(raw); } catch { return fallback; }
+}
+
+async function kvPut(env, key, value) {
+  await env.MINISKYNET_KV.put(key, JSON.stringify(value, null, 2));
+}
+
+async function loadConfig(env) {
+  return {
+    telegramToken: String(env.TELEGRAM_BOT_TOKEN || "").trim() || await kvText(env, "config:TELEGRAM_BOT_TOKEN"),
+    ownerId: String(env.TELEGRAM_ALLOWED_USER_ID || "").trim() || await kvText(env, "config:TELEGRAM_ALLOWED_USER_ID"),
+    githubToken: String(env.GITHUB_TOKEN || "").trim() || await kvText(env, "config:GITHUB_TOKEN"),
+    repo: String(env.GITHUB_REPO || "").trim() || await kvText(env, "config:GITHUB_REPO") || DEFAULT_REPO,
+    branch: String(env.GITHUB_BRANCH || "").trim() || await kvText(env, "config:GITHUB_BRANCH") || DEFAULT_BRANCH,
+    workerUrl: String(env.WORKER_URL || "").trim() || await kvText(env, "config:WORKER_URL") || DEFAULT_WORKER_URL,
+    model: String(env.OPENROUTER_MODEL_CHEAP || "").trim() || await kvText(env, "config:OPENROUTER_MODEL_CHEAP") || "openai/gpt-4o-mini"
+  };
+}
+
+function ownerOk(config, userId) {
+  return !config.ownerId || String(userId || "") === String(config.ownerId);
+}
+
+async function telegramApi(config, method, body) {
+  if (!config.telegramToken) throw new Error("TELEGRAM_BOT_TOKEN missing");
+  const response = await fetch(`https://api.telegram.org/bot${config.telegramToken}/${method}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(body)
+  });
+  return await response.json().catch(() => ({}));
+}
+
+async function send(config, chatId, text) {
+  if (!chatId) return;
+  await telegramApi(config, "sendMessage", { chat_id: chatId, text: clip(text) });
+}
+
+async function arrayStore(env, key) {
+  return (await kvGet(env, key, { [key]: [] }))[key] || [];
+}
+
+async function saveArray(env, key, items, limit = 100) {
+  await kvPut(env, key, { [key]: items.slice(-limit) });
+}
+
+async function getSelf(env) {
+  return await kvGet(env, "self", {
+    text: "Я MiniSkynet / облачная Лондон Сергея. Плоский Core v4: Telegram, Cloudflare Worker, KV, GitHub. Работаю коротко, по-русски и через безопасный approve.",
+    updated_at: now()
+  });
+}
+
+async function getGoals(env) {
+  return await kvGet(env, "goals", {
+    goals: [
+      "Быть личным инженерным агентом Сергея",
+      "Читать repo перед изменениями",
+      "Готовить patch только через approve",
+      "Не возвращаться к runtime-луковице"
+    ],
+    updated_at: now()
+  });
+}
+
+async function getPlan(env) {
+  return await kvGet(env, "plan", {
+    steps: [
+      "Восстановить стабильный v4.2.1",
+      "Проверить /status и /health_check",
+      "Вернуть apply-контур маленьким патчем",
+      "Только потом включать safe alive loop"
+    ],
+    updated_at: now()
+  });
+}
+
+function localHealth() {
+  return {
+    ok: true,
+    version: VERSION,
+    flat_core: true,
+    onion_imports: false,
+    self_health_check: true,
+    owner_guard: "fixed"
+  };
+}
+
+async function publicHealth(config) {
+  const started = Date.now();
+  const base = String(config.workerUrl || DEFAULT_WORKER_URL).replace(/\/$/, "");
+  try {
+    const response = await fetch(`${base}/health?ts=${Date.now()}`, { headers: { "cache-control": "no-cache" } });
+    const text = await response.text();
+    let data = null;
+    try { data = JSON.parse(text); } catch {}
+    return {
+      ok: response.ok && Boolean(data?.ok),
+      http: response.status,
+      url: `${base}/health`,
+      version: data?.version || null,
+      flat_core: Boolean(data?.flat_core),
+      ms: Date.now() - started
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      http: 0,
+      url: `${base}/health`,
+      version: null,
+      flat_core: false,
+      ms: Date.now() - started,
+      error: String(error.message || error)
+    };
+  }
+}
+
+function healthText(health) {
+  return [
+    "🩺 Health check v4.2.1:",
+    "Local Telegram runtime:",
+    `- ok: ${health.local.ok ? "yes ✅" : "no ⛔"}`,
+    `- version: ${health.local.version}`,
+    `- flat_core: ${health.local.flat_core ? "yes ✅" : "no"}`,
+    `- owner_guard: ${health.local.owner_guard}`,
+    "- deploy via Telegram webhook: verified ✅",
+    "",
+    "Public /health route:",
+    `- url: ${health.public.url}`,
+    `- http: ${health.public.http}`,
+    `- ok: ${health.public.ok ? "yes ✅" : "no/optional ⚠️"}`,
+    `- version: ${health.public.version || "—"}`,
+    `- time: ${health.public.ms}ms`,
+    "",
+    health.public.ok ? "Public health: OK ✅" : "Public health optional failed; Telegram runtime still verified."
+  ].join("\n");
+}
+
+function b64Decode(value) {
+  const binary = atob(String(value || "").replace(/\n/g, ""));
+  return new TextDecoder("utf-8").decode(Uint8Array.from(binary, char => char.charCodeAt(0)));
+}
+
+function encodeRepoPath(path) {
+  return cleanPath(path).split("/").map(encodeURIComponent).join("/");
+}
+
+async function githubFile(config, path) {
+  const safe = safePath(path);
+  if (!safe) throw new Error("unsafe path");
+  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v421" };
+  if (config.githubToken) headers.authorization = `Bearer ${config.githubToken}`;
+  const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}?ref=${encodeURIComponent(config.branch)}`, { headers });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(`GitHub ${response.status}: ${data.message || "request failed"}`);
+  if (Array.isArray(data) || !data.content) throw new Error("not a text file");
+  return { path: safe, sha: data.sha || "", size: data.size || 0, content: b64Decode(data.content) };
+}
+
+function mainFromWrangler(content) {
+  const match = String(content || "").match(/^main\s*=\s*["']([^"']+)["']/m);
+  if (!match) return null;
+  const rel = cleanPath(match[1]);
+  return rel.startsWith("cloudflare/") ? rel : `cloudflare/${rel}`;
+}
+
+async function activeTarget(config) {
+  const wrangler = await githubFile(config, "cloudflare/wrangler.toml");
+  const start = mainFromWrangler(wrangler.content);
+  if (!start) throw new Error("wrangler main not found");
+  const effective = await githubFile(config, start);
+  return { start, effective, chain: [{ path: effective.path, sha: effective.sha, size: effective.size }] };
+}
+
+const COMMANDS = new Set([
+  "/start", "/help", "/status", "/health_check", "/deploy_check",
+  "/self", "/self_set", "/goals", "/goal_add", "/plan", "/plan_set",
+  "/tasks", "/addtask", "/task_done", "/next", "/memory", "/memory_score",
+  "/repo_config", "/repo_file", "/repo_scan", "/active_target",
+  "/proposals", "/show", "/reject", "/approve"
+]);
+
+async function handleCommand(env, config, message) {
+  const { chatId, command, args } = message;
+
+  if (command === "/start") {
+    return send(config, chatId, `✅ MiniSkynet Core v4 проснулся.\nversion: ${VERSION}\n/help — команды`);
+  }
+
+  if (command === "/help") {
+    return send(config, chatId, [
+      "/start /help /status",
+      "Development stage: " + VERSION,
+      "/health_check /deploy_check",
+      "/self /self_set текст",
+      "/goals /goal_add текст",
+      "/plan /plan_set шаг1 | шаг2",
+      "/tasks /addtask текст /task_done n /next",
+      "/memory /memory_score",
+      "/repo_config /repo_file path /repo_scan /active_target",
+      "/proposals /show id /approve id /reject id",
+      "Apply-контур временно выключен до стабилизации v4.2.1."
+    ].join("\n"));
+  }
+
+  if (command === "/status") {
+    const tasks = await arrayStore(env, "tasks");
+    const memories = await arrayStore(env, "memories");
+    const proposals = await arrayStore(env, "proposals");
+    return send(config, chatId, [
+      "📡 MiniSkynet Core v4 status",
+      `- version: ${VERSION}`,
+      "- runtime: single file, no onion imports",
+      "- self health check: active",
+      "- owner guard: fixed",
+      `- tasks: active=${tasks.filter(t => t.status !== "done").length}, done=${tasks.filter(t => t.status === "done").length}`,
+      `- memory: ${memories.length}`,
+      `- proposals: ${proposals.length}`,
+      `- model: ${config.model}`
+    ].join("\n"));
+  }
+
+  if (command === "/health_check" || command === "/deploy_check") {
+    return send(config, chatId, healthText({ local: localHealth(), public: await publicHealth(config) }));
+  }
+
+  if (command === "/self") return send(config, chatId, `🧠 Self:\n${(await getSelf(env)).text}\n\nИзменить: /self_set текст`);
+  if (command === "/self_set") { await kvPut(env, "self", { text: args, updated_at: now() }); return send(config, chatId, "✅ Self обновлён."); }
+  if (command === "/goals") return send(config, chatId, "🎯 Goals:\n" + (await getGoals(env)).goals.map((g, i) => `${i + 1}. ${g}`).join("\n"));
+  if (command === "/goal_add") { const g = await getGoals(env); g.goals.push(args); g.updated_at = now(); await kvPut(env, "goals", g); return send(config, chatId, "✅ Goal добавлена."); }
+  if (command === "/plan") return send(config, chatId, "🗺 Plan:\n" + (await getPlan(env)).steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
+  if (command === "/plan_set") { await kvPut(env, "plan", { steps: args.split("|").map(x => x.trim()).filter(Boolean), updated_at: now() }); return send(config, chatId, "✅ Plan обновлён."); }
+
+  if (command === "/tasks") {
+    const tasks = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").slice(0, 12);
+    return send(config, chatId, tasks.length ? "📋 Active tasks:\n" + tasks.map((t, i) => `${i + 1}. ${t.id} p${t.p || 4}: ${t.text}`).join("\n") : "Задач нет.");
+  }
+  if (command === "/addtask") { const tasks = await arrayStore(env, "tasks"); const task = { id: makeId("task"), text: args, p: 4, status: "todo", created_at: now() }; tasks.push(task); await saveArray(env, "tasks", tasks, 120); return send(config, chatId, `✅ Добавил ${task.id}`); }
+  if (command === "/task_done") { const tasks = await arrayStore(env, "tasks"); const active = tasks.filter(t => t.status !== "done"); const task = active[(parseInt(args, 10) || 1) - 1]; if (!task) return send(config, chatId, "Не нашёл задачу."); task.status = "done"; task.done_at = now(); await saveArray(env, "tasks", tasks, 120); return send(config, chatId, `✅ Закрыл: ${task.text}`); }
+  if (command === "/next") { const task = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").sort((a, b) => (a.p || 9) - (b.p || 9))[0]; const firstPlan = (await getPlan(env)).steps[0]; return send(config, chatId, `⏭ Next:\n${task ? `Источник: tasks\nШаг: ${task.text}` : `Источник: plan\nШаг: ${firstPlan || "плана нет"}`}`); }
+
+  if (command === "/memory") { const memories = await arrayStore(env, "memories"); return send(config, chatId, memories.length ? "🧠 Memory:\n" + memories.slice(-8).map(m => `- [${m.type || "note"}/${m.score || 0}] ${m.text}`).join("\n") : "Память пустая."); }
+  if (command === "/memory_score") { const memories = await arrayStore(env, "memories"); const avg = memories.length ? Math.round(memories.reduce((a, b) => a + (b.score || 0), 0) / memories.length) : 0; return send(config, chatId, `🧠 Memory Quality:\n- всего: ${memories.length}\n- avg: ${avg}/100`); }
+
+  if (command === "/repo_config") return send(config, chatId, `🔎 Repo:\n- repo: ${config.repo}\n- branch: ${config.branch}\n- token: ${config.githubToken ? "есть ✅" : "нет ⛔"}\n- workerUrl: ${config.workerUrl}`);
+  if (command === "/repo_file") { const file = await githubFile(config, args); return send(config, chatId, `📄 ${file.path}\n- size: ${file.size}\n- sha: ${file.sha.slice(0, 12)}\n\n${clip(file.content, 1200)}`); }
+  if (command === "/repo_scan") { const files = ["cloudflare/wrangler.toml", "cloudflare/src/index-v4.js"]; const out = []; for (const path of files) { try { const file = await githubFile(config, path); out.push(`✅ ${path} size=${file.size} sha=${file.sha.slice(0, 10)}`); } catch (error) { out.push(`❌ ${path}: ${error.message}`); } } return send(config, chatId, "🧭 Repo scan:\n" + out.join("\n")); }
+  if (command === "/active_target") { const active = await activeTarget(config); return send(config, chatId, [`🎯 Active target:`, `- wrangler main: ${active.start}`, `- effective: ${active.effective.path}`, `- sha: ${active.effective.sha.slice(0, 12)}`].join("\n")); }
+
+  if (command === "/proposals") { const proposals = await arrayStore(env, "proposals"); return send(config, chatId, proposals.length ? "📦 Proposals:\n" + proposals.slice(-10).map(p => `- ${p.id} [${p.status}] ${p.title || p.request}`).join("\n") : "Proposals нет."); }
+  if (command === "/show") { const proposals = await arrayStore(env, "proposals"); const p = proposals.find(x => x.id === args || String(x.id || "").startsWith(args)); return send(config, chatId, p ? `📦 ${p.id}\nstatus: ${p.status}\ntarget: ${p.file_path || "—"}\nrequest: ${p.request || p.title || "—"}` : "Не нашёл proposal."); }
+  if (command === "/approve" || command === "/reject") { const proposals = await arrayStore(env, "proposals"); const p = proposals.find(x => x.id === args || String(x.id || "").startsWith(args)); if (!p) return send(config, chatId, "Не нашёл proposal."); p.status = command === "/approve" ? "approved" : "rejected"; p.updated_at = now(); await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ ${p.status}: ${p.id}`); }
+
+  return send(config, chatId, `Не знаю команду ${command}. /help — список. Модель не вызываю.`);
+}
+
+async function handleTelegram(request, env) {
+  const config = await loadConfig(env);
+  const update = await request.json().catch(() => null);
+  const message = parseUpdate(update);
+  if (!message) return json({ ok: true });
+  if (!ownerOk(config, message.userId)) {
+    await send(config, message.chatId, "⛔ Доступ закрыт.");
+    return json({ ok: true, denied: true });
+  }
+  if (message.command) {
+    if (!COMMANDS.has(message.command)) {
+      await send(config, message.chatId, `Не знаю команду ${message.command}. /help — список. Модель не вызываю.`);
+      return json({ ok: true, unknown_command: true });
+    }
+    await handleCommand(env, config, message);
+    return json({ ok: true, command: message.command, version: VERSION });
+  }
+  await send(config, message.chatId, "Core v4.2.1 rescue online. Обычный think временно выключен до стабилизации. /help");
+  return json({ ok: true, text_mode: "rescue" });
+}
+
+export default {
+  async fetch(request, env) {
+    const url = new URL(request.url);
+    if (url.pathname === "/" || url.pathname === "/health") return json(localHealth());
+    if (url.pathname === "/telegram" && request.method === "POST") return handleTelegram(request, env);
+    return json({ ok: false, error: "not found", version: VERSION }, 404);
+  },
+  async scheduled() {}
+};
