@@ -10,7 +10,7 @@ const SELF_APPLY_MARKERS=[
   "single-file flat runtime",
   "proposal FSM",
   "confirm-only GitHub write",
-  "proposal-specific verification"
+  "proposal-specific verification",
 ];
 
 const CMDS=new Set(["/start","/help","/status","/self","/self_set","/goals","/goal_add","/plan","/plan_set","/tasks","/addtask","/task_done","/next","/memory","/memory_score","/think","/repo_config","/repo_file","/repo_scan","/active_target","/propose","/proposals","/show","/reject","/code_preview","/code_show","/apply_check","/apply_confirm","/apply_status","/post_apply_verify","/proposals_clean","/health_check","/deploy_check"]);
