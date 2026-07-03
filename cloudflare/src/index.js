@@ -137,6 +137,85 @@ async function costReport(env, cfg) {
   ].join("\n");
 }
 
+const ACTIVE_TASK_STATUSES = new Set(["todo", "retry_wait", "doing", "pending", "active"]);
+const VALID_MEMORY_STATUSES = new Set(["hypothesis", "fact", "rule"]);
+const STALE_PATTERNS = [
+  "growth_hygiene",
+  "growth-задача",
+  "очередь роста",
+  "worker-inspector",
+  "worker-agents",
+  "worker-universal-proof",
+  "обновление статуса диалога завершено",
+  "вывод нужно проверять практикой",
+  "метрик использования памяти",
+  "метрики использования памяти",
+  "мониторинг памяти",
+  "мониторинга производительности",
+  "несуществующими командами проверки"
+];
+function taskStatus(t) { return String(t?.status || "todo").toLowerCase(); }
+function isActiveTask(t) { return ACTIVE_TASK_STATUSES.has(taskStatus(t)); }
+function memoryText(m) { return `${m?.signal || ""} ${m?.lesson || ""} ${m?.action || ""} ${m?.check || ""} ${m?.boundary || ""}`.toLowerCase(); }
+function isStaleMemory(m) {
+  const status = String(m?.status || "").toLowerCase();
+  const text = memoryText(m);
+  if (!VALID_MEMORY_STATUSES.has(status)) return true;
+  return STALE_PATTERNS.some(p => text.includes(p));
+}
+function visibleMemories(memories) { return memories.filter(m => !isStaleMemory(m)); }
+function cleanState(tasks, memories) {
+  const cleanTasks = tasks.filter(isActiveTask);
+  const cleanMemories = [];
+  const seen = new Set();
+  for (const m of memories) {
+    if (isStaleMemory(m)) continue;
+    const k = String(m.lesson || "").toLowerCase().replace(/\s+/g, " ").trim();
+    if (!k || seen.has(k)) continue;
+    seen.add(k);
+    cleanMemories.push(m);
+  }
+  return {
+    cleanTasks,
+    cleanMemories,
+    removedTasks: tasks.length - cleanTasks.length,
+    removedMemories: memories.length - cleanMemories.length
+  };
+}
+function cleanPreviewText(tasks, memories) {
+  const c = cleanState(tasks, memories);
+  const staleMem = memories.filter(isStaleMemory).slice(0, 8);
+  const archivedTasks = tasks.filter(t => !isActiveTask(t)).slice(0, 8);
+  return [
+    "🧹 KV Hygiene preview:",
+    `- задач сейчас: ${tasks.length}, останется active: ${c.cleanTasks.length}, будет убрано: ${c.removedTasks}`,
+    `- памяти сейчас: ${memories.length}, останется чистой: ${c.cleanMemories.length}, будет убрано: ${c.removedMemories}`,
+    "",
+    "Примеры задач на уборку:",
+    ...(archivedTasks.length ? archivedTasks.map(t => `- [${t.status}] ${String(t.title || "").slice(0, 120)}`) : ["- нет"]),
+    "",
+    "Примеры памяти на уборку:",
+    ...(staleMem.length ? staleMem.map(m => `- [${m.status}] ${String(m.lesson || m.signal || "").slice(0, 120)}`) : ["- нет"]),
+    "",
+    "Применить: /clean_apply"
+  ].join("\n");
+}
+async function applyClean(env) {
+  const [tasks, memories] = await Promise.all([getTasks(env), getMemories(env)]);
+  const c = cleanState(tasks, memories);
+  c.cleanMemories.push(normalizeMemory({
+    signal: "MiniSkynet Core v2 запущен после очистки KV.",
+    lesson: "Старая Growth-память признана устаревшей; дальше развивать v2 маленькими безопасными патчами.",
+    action: "Опираться на чистые задачи, явные цели и проверяемые команды v2.",
+    check: "Проверять /status, /tasks, /memory и /cost после каждого патча.",
+    boundary: "Старая KV могла содержать полезные исторические следы, но не должна управлять v2.",
+    status: "fact",
+    score: 95
+  }, "hygiene"));
+  await Promise.all([saveTasks(env, c.cleanTasks), saveMemories(env, c.cleanMemories)]);
+  return { ...c, beforeTasks: tasks.length, beforeMemories: memories.length };
+}
+
 async function chat(env, cfg, prompt) {
   const input = tokenEstimate(prompt);
   const maxOut = Math.min(cfg.maxOutputTokens, 1200);
@@ -215,14 +294,15 @@ function thinkPrompt({ text, tasks, memories }) {
     "Верни строго JSON:",
     '{ "message":"ответ владельцу", "memory_artifact":{"lesson":"...","action":"...","status":"hypothesis|fact|rule","score":1}, "next_tasks":["..."] }',
     "Если нечего сохранить в память — memory_artifact=null. next_tasks максимум 3.",
-    `Задачи: ${JSON.stringify(tasks.slice(-10))}`,
+    `Задачи: ${JSON.stringify(tasks.filter(isActiveTask).slice(-10))}`,
     `Релевантная память: ${JSON.stringify(memories)}`,
     `Сообщение владельца: ${text}`
   ].join("\n");
 }
+
 async function runThink(env, cfg, chatId, text) {
   const [tasks, allMem] = await Promise.all([getTasks(env), getMemories(env)]);
-  const memories = selectRelevant(allMem, text, 8);
+  const memories = selectRelevant(visibleMemories(allMem), text, 8);
   let response;
   try {
     response = await chat(env, cfg, thinkPrompt({ text, tasks, memories }));
@@ -286,13 +366,14 @@ async function reflect(env, cfg, chatId = null) {
   let dup = 0;
   const kept = [];
   for (const m of mem) {
+    if (isStaleMemory(m)) { dup++; continue; }
     const k = String(m.lesson || "").toLowerCase().replace(/\s+/g, " ").trim();
     if (!k) continue;
     if (seen.has(k)) { kept[seen.get(k)].repeat_count = (kept[seen.get(k)].repeat_count || 1) + 1; dup++; continue; }
     seen.set(k, kept.length); kept.push(m);
   }
   await saveMemories(env, kept);
-  const report = [`🌙 Рефлексия v2:`, `- дублей убрано: ${dup}`, `- памяти было: ${mem.length}, стало: ${kept.length}`, "Глубокая модельная рефлексия будет следующим модулем."].join("\n");
+  const report = [`🌙 Рефлексия v2:`, `- мусора/дублей убрано: ${dup}`, `- памяти было: ${mem.length}, стало: ${kept.length}`, "Для задач используй /clean_preview и /clean_apply."].join("\n");
   if (chatId) await send(cfg, chatId, report);
   return report;
 }
@@ -301,8 +382,9 @@ const HELP = [
   "/start — включить v2 и показать id",
   "/status — состояние ядра",
   "/think текст — один цикл мышления; обычный текст тоже работает",
-  "/tasks /addtask текст — задачи",
-  "/memory — память",
+  "/tasks /tasks_all /addtask текст — задачи",
+  "/memory /memory_all — память",
+  "/clean_preview /clean_apply — уборка старой KV-памяти и задач",
   "/cost — расходы",
   "/alive_on /alive_off — автоцикл",
   "/reflect — чистка/рефлексия памяти",
@@ -320,15 +402,21 @@ async function handleCommand(env, cfg, msg) {
   if (command === "/help") return await send(cfg, chatId, HELP);
   if (command === "/status") {
     const [b, tasks, mem, props] = await Promise.all([getBrain(env), getTasks(env), getMemories(env), getProposals(env)]);
-    const todo = tasks.filter(t => ["todo", "retry_wait"].includes(t.status)).length;
-    const done = tasks.filter(t => t.status === "done").length;
+    const active = tasks.filter(isActiveTask).length;
+    const hidden = tasks.length - active;
+    const cleanMem = visibleMemories(mem).length;
+    const hiddenMem = mem.length - cleanMem;
     const pending = props.filter(p => p.status === "pending").length;
-    return await send(cfg, chatId, ["📡 MiniSkynet v2 status", `- version: ${VERSION}`, `- alive: ${b.alive_enabled}`, `- циклов всего: ${b.stats?.cycles_total || 0}`, `- задачи: todo=${todo}, done=${done}`, `- память: ${mem.length}`, `- proposals pending: ${pending}`, `- модель: ${cfg.modelCheap}`].join("\n"));
+    return await send(cfg, chatId, ["📡 MiniSkynet v2 status", `- version: ${VERSION}`, `- alive: ${b.alive_enabled}`, `- циклов всего: ${b.stats?.cycles_total || 0}`, `- задачи: active=${active}, hidden=${hidden}`, `- память: clean=${cleanMem}, hidden=${hiddenMem}`, `- proposals pending: ${pending}`, `- модель: ${cfg.modelCheap}`].join("\n"));
   }
   if (command === "/think") return await runThink(env, cfg, chatId, args || "Сделай один маленький полезный шаг для развития MiniSkynet.");
-  if (command === "/tasks") return await send(cfg, chatId, "📋 Задачи:\n" + formatTasks(await getTasks(env)));
+  if (command === "/tasks") return await send(cfg, chatId, "📋 Активные задачи:\n" + formatTasks((await getTasks(env)).filter(isActiveTask)));
+  if (command === "/tasks_all") return await send(cfg, chatId, "📋 Все задачи:\n" + formatTasks(await getTasks(env)));
   if (command === "/addtask") { if (!args) return await send(cfg, chatId, "Напиши: /addtask проверить память"); const t = await addTask(env, args); return await send(cfg, chatId, `✅ Добавил задачу ${t.id}:\n${t.title}`); }
-  if (command === "/memory") return await send(cfg, chatId, "🧠 Память:\n" + formatMemories(await getMemories(env)));
+  if (command === "/memory") return await send(cfg, chatId, "🧠 Чистая память:\n" + formatMemories(visibleMemories(await getMemories(env))));
+  if (command === "/memory_all") return await send(cfg, chatId, "🧠 Вся память:\n" + formatMemories(await getMemories(env)));
+  if (command === "/clean_preview") { const [tasks, mem] = await Promise.all([getTasks(env), getMemories(env)]); return await send(cfg, chatId, cleanPreviewText(tasks, mem)); }
+  if (command === "/clean_apply") { const r = await applyClean(env); return await send(cfg, chatId, [`✅ KV очищена.`, `- задач было: ${r.beforeTasks}, стало: ${r.cleanTasks.length}, убрано: ${r.removedTasks}`, `- памяти было: ${r.beforeMemories}, стало: ${r.cleanMemories.length}, убрано: ${r.removedMemories}`, `Проверь: /status /tasks /memory`].join("\n")); }
   if (command === "/cost") return await send(cfg, chatId, await costReport(env, cfg));
   if (command === "/alive_on") { const b = await getBrain(env); b.alive_enabled = true; b.owner_chat_id = chatId; await saveBrain(env, b); return await send(cfg, chatId, "✅ Alive включён. Cron будет делать маленький шаг примерно раз в 30 минут."); }
   if (command === "/alive_off") { const b = await getBrain(env); b.alive_enabled = false; await saveBrain(env, b); return await send(cfg, chatId, "😴 Alive выключен."); }
