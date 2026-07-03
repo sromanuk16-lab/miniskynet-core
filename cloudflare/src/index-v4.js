@@ -1,4 +1,4 @@
-const VERSION = "v4.6.1-auto-marker-fallback-2026-07-03";
+const VERSION = "v4.6.2-robust-auto-insert-2026-07-03";
 const DEFAULT_WORKER_URL = "https://miniskynet-core.sromanuk16.workers.dev";
 const DEFAULT_REPO = "sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH = "main";
@@ -43,6 +43,12 @@ async function kvGet(env, key, fallback) {
 async function kvPut(env, key, value) {
   await env.MINISKYNET_KV.put(key, JSON.stringify(value, null, 2));
 }
+async function arrayStore(env, key) {
+  return (await kvGet(env, key, { [key]: [] }))[key] || [];
+}
+async function saveArray(env, key, items, limit = 100) {
+  await kvPut(env, key, { [key]: items.slice(-limit) });
+}
 
 async function loadConfig(env) {
   return {
@@ -74,13 +80,6 @@ async function send(config, chatId, text) {
   await telegramApi(config, "sendMessage", { chat_id: chatId, text: clip(text) });
 }
 
-async function arrayStore(env, key) {
-  return (await kvGet(env, key, { [key]: [] }))[key] || [];
-}
-async function saveArray(env, key, items, limit = 100) {
-  await kvPut(env, key, { [key]: items.slice(-limit) });
-}
-
 async function getSelf(env) {
   return await kvGet(env, "self", {
     text: "Я MiniSkynet / облачная Лондон Сергея. Плоский Core v4: Telegram, Cloudflare Worker, KV, GitHub. Работаю коротко, по-русски и через безопасный approve.",
@@ -101,7 +100,7 @@ async function getGoals(env) {
 async function getPlan(env) {
   return await kvGet(env, "plan", {
     steps: [
-      "Проверить v4.6.1 auto marker fallback",
+      "Проверить v4.6.2 robust auto insert",
       "Сделать /propose → auto patch/code/check",
       "Оставить одну финальную команду /apply_confirm для записи",
       "После стабильности вернуть обычный think"
@@ -119,8 +118,7 @@ function localHealth() {
     self_health_check: true,
     apply_contour: true,
     auto_propose_pipeline: true,
-    help_marker_fallback: true,
-    confirmed_marker_operation: true,
+    robust_auto_insert: true,
     owner_guard: "fixed"
   };
 }
@@ -139,14 +137,14 @@ async function publicHealth(config) {
 }
 function healthText(health) {
   return [
-    "🩺 Health check v4.6.1:",
+    "🩺 Health check v4.6.2:",
     "Local Telegram runtime:",
     `- ok: ${health.local.ok ? "yes ✅" : "no ⛔"}`,
     `- version: ${health.local.version}`,
     `- flat_core: ${health.local.flat_core ? "yes ✅" : "no"}`,
     `- apply_contour: ${health.local.apply_contour ? "active ✅" : "off"}`,
     `- auto_propose_pipeline: ${health.local.auto_propose_pipeline ? "active ✅" : "off"}`,
-    `- help_marker_fallback: ${health.local.help_marker_fallback ? "active ✅" : "off"}`,
+    `- robust_auto_insert: ${health.local.robust_auto_insert ? "active ✅" : "off"}`,
     `- owner_guard: ${health.local.owner_guard}`,
     "- deploy via Telegram webhook: verified ✅",
     "",
@@ -176,7 +174,7 @@ function encodeRepoPath(path) {
 async function githubFile(config, path) {
   const safe = safePath(path);
   if (!safe) throw new Error("unsafe path");
-  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v461" };
+  const headers = { accept: "application/vnd.github+json", "user-agent": "MiniSkynet-Core-v462" };
   if (config.githubToken) headers.authorization = `Bearer ${config.githubToken}`;
   const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}?ref=${encodeURIComponent(config.branch)}`, { headers });
   const data = await response.json().catch(() => ({}));
@@ -190,7 +188,7 @@ async function githubWrite(config, path, sha, content, message) {
   if (!safe) throw new Error("unsafe path");
   const response = await fetch(`https://api.github.com/repos/${config.repo}/contents/${encodeRepoPath(safe)}`, {
     method: "PUT",
-    headers: { accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "MiniSkynet-Core-v461", authorization: `Bearer ${config.githubToken}` },
+    headers: { accept: "application/vnd.github+json", "content-type": "application/json", "user-agent": "MiniSkynet-Core-v462", authorization: `Bearer ${config.githubToken}` },
     body: JSON.stringify({ message, content: b64Encode(content), sha, branch: config.branch })
   });
   const data = await response.json().catch(() => ({}));
@@ -236,60 +234,53 @@ function applyFullFileDiff(oldContent, diff) {
   return plus.join("\n") + (oldContent.endsWith("\n") ? "\n" : "");
 }
 
-function helpBlock(content) {
-  const a = content.indexOf('if (command === "/help")');
-  const b = a >= 0 ? content.indexOf('if (command === "/status")', a) : -1;
-  return a >= 0 && b > a ? content.slice(a, b) : "";
+function hasHelpText(content, text) {
+  return String(content || "").includes(text);
 }
-function helpHasLine(content, line) {
-  return helpBlock(content).includes(line);
+function insertHelpLine(content, jsExpressionLine) {
+  if (hasHelpText(content, jsExpressionLine.replace(/" \+ VERSION$/, ""))) return content;
+  const anchors = [
+    '      "/health_check /deploy_check /post_apply_verify id",',
+    '      "/self /self_set текст",',
+    '      "Development stage: " + VERSION,'
+  ];
+  for (const anchor of anchors) {
+    if (content.includes(anchor)) return content.replace(anchor, `      ${jsExpressionLine},\n${anchor}`);
+  }
+  const helpStart = content.indexOf('if (command === "/help")');
+  const joinAt = helpStart >= 0 ? content.indexOf('    ].join("\\n"));', helpStart) : -1;
+  if (helpStart >= 0 && joinAt > helpStart) {
+    return content.slice(0, joinAt) + `      ${jsExpressionLine},\n` + content.slice(joinAt);
+  }
+  throw new Error("help insert point not found");
 }
-function replaceInHelp(content, needle, replacement) {
-  const a = content.indexOf('if (command === "/help")');
-  const b = a >= 0 ? content.indexOf('if (command === "/status")', a) : -1;
-  if (a < 0 || b <= a) throw new Error("help block not found");
-  const before = content.slice(0, a);
-  const block = content.slice(a, b);
-  const after = content.slice(b);
-  if (block.includes(needle)) return before + block.replace(needle, replacement) + after;
-  const fallback = '"/start /help /status",';
-  const addLine = String(replacement).split("\n").pop();
-  if (block.includes(fallback) && addLine) return before + block.replace(fallback, `${fallback}\n      ${addLine}`) + after;
-  throw new Error("help insertion marker not found");
-}
-function isRuntimeVisibleProposal(proposal) {
-  return /help|status|stage|command|команд|статус|development|smoke|marker|маркер|confirm|confirmed|подтверд|auto|pipeline/i.test(`${proposal.title || ""} ${proposal.request || ""} ${proposal.patch_draft?.intent || ""}`);
-}
+
 function makeDeterministicPatch(proposal, file) {
   const request = `${proposal.title || ""} ${proposal.request || ""}`;
-  const devLine = '"Development stage: " + VERSION,';
-  const smokeLine = '"Self-apply smoke marker: " + VERSION,';
-  const confirmedLine = '"Self-apply confirmed marker: " + VERSION,';
-  const autoLine = '"Auto pipeline: propose -> patch -> code -> check -> one confirm",';
-
   if (/auto|pipeline|авто|автомат/i.test(request)) {
-    if (helpHasLine(file.content, autoLine)) return { already: true, summary: "Auto pipeline marker уже есть в /help", content: file.content };
-    const anchor = helpHasLine(file.content, confirmedLine) ? confirmedLine : devLine;
-    return { already: false, summary: "Добавить auto pipeline marker в /help", content: replaceInHelp(file.content, anchor, `${anchor}\n      ${autoLine}`) };
+    const markerText = "Auto pipeline marker:";
+    if (file.content.includes(markerText)) return { already: true, summary: "Auto pipeline marker уже есть", content: file.content };
+    return { already: false, summary: "Добавить auto pipeline marker", content: insertHelpLine(file.content, '"Auto pipeline marker: " + VERSION') };
   }
-  if (/confirm|confirmed|second|v4\.5|подтверд|втор/i.test(request)) {
-    if (helpHasLine(file.content, confirmedLine)) return { already: true, summary: "Self-apply confirmed marker уже есть в /help", content: file.content };
-    const anchor = helpHasLine(file.content, smokeLine) ? smokeLine : devLine;
-    return { already: false, summary: "Добавить self-apply confirmed marker в /help", content: replaceInHelp(file.content, anchor, `${anchor}\n      ${confirmedLine}`) };
+  if (/confirm|confirmed|подтверд|втор/i.test(request)) {
+    const markerText = "Self-apply confirmed marker:";
+    if (file.content.includes(markerText)) return { already: true, summary: "Self-apply confirmed marker уже есть", content: file.content };
+    return { already: false, summary: "Добавить self-apply confirmed marker", content: insertHelpLine(file.content, '"Self-apply confirmed marker: " + VERSION') };
   }
   if (/smoke|marker|маркер|self.apply|self-apply|само/i.test(request)) {
-    if (helpHasLine(file.content, smokeLine)) return { already: true, summary: "Self-apply smoke marker уже есть в /help", content: file.content };
-    return { already: false, summary: "Добавить self-apply smoke marker в /help", content: replaceInHelp(file.content, devLine, `${devLine}\n      ${smokeLine}`) };
+    const markerText = "Self-apply smoke marker:";
+    if (file.content.includes(markerText)) return { already: true, summary: "Self-apply smoke marker уже есть", content: file.content };
+    return { already: false, summary: "Добавить self-apply smoke marker", content: insertHelpLine(file.content, '"Self-apply smoke marker: " + VERSION') };
   }
   if (/help|stage|development|команд/i.test(request)) {
-    if (helpHasLine(file.content, devLine)) return { already: true, summary: "Development stage уже есть в /help", content: file.content };
-    const startLine = '"/start /help /status",';
-    return { already: false, summary: "Показать Development stage в /help", content: replaceInHelp(file.content, startLine, `${startLine}\n      ${devLine}`) };
+    const markerText = "Development stage:";
+    if (file.content.includes(markerText)) return { already: true, summary: "Development stage уже есть", content: file.content };
+    return { already: false, summary: "Показать Development stage", content: insertHelpLine(file.content, '"Development stage: " + VERSION') };
   }
   if (/health|deploy|verify|провер/i.test(request)) {
     if (file.content.includes("apply_contour: true")) return { already: true, summary: "Apply contour уже отмечен в health", content: file.content };
   }
-  throw new Error("Нет безопасной deterministic operation для этого proposal. Уточни proposal: confirmed marker / smoke marker / auto pipeline / help stage.");
+  throw new Error("Нет безопасной deterministic operation. Используй: auto pipeline marker / confirmed marker / smoke marker / help stage.");
 }
 
 function buildCodeDraft(proposal, file) {
@@ -370,7 +361,7 @@ async function handleCommand(env, config, message) {
     const taskItems = await arrayStore(env, "tasks");
     const memories = await arrayStore(env, "memories");
     const proposals = await arrayStore(env, "proposals");
-    return send(config, chatId, ["📡 MiniSkynet Core v4 status", `- version: ${VERSION}`, "- runtime: single file, no onion imports", "- self health check: active", "- apply contour: active", "- auto propose pipeline: active", "- help marker fallback: active", "- owner guard: fixed", `- tasks: active=${taskItems.filter(t => t.status !== "done").length}, done=${taskItems.filter(t => t.status === "done").length}`, `- memory: ${memories.length}`, `- proposals: ${proposals.length}`, `- model: ${config.model}`].join("\n"));
+    return send(config, chatId, ["📡 MiniSkynet Core v4 status", `- version: ${VERSION}`, "- runtime: single file, no onion imports", "- self health check: active", "- apply contour: active", "- auto propose pipeline: active", "- robust auto insert: active", "- owner guard: fixed", `- tasks: active=${taskItems.filter(t => t.status !== "done").length}, done=${taskItems.filter(t => t.status === "done").length}`, `- memory: ${memories.length}`, `- proposals: ${proposals.length}`, `- model: ${config.model}`].join("\n"));
   }
   if (command === "/health_check" || command === "/deploy_check") return send(config, chatId, healthText({ local: localHealth(), public: await publicHealth(config) }));
   if (command === "/post_apply_verify") return send(config, chatId, postApplyText(await runPostApplyVerify(env, config, args)));
@@ -380,10 +371,7 @@ async function handleCommand(env, config, message) {
   if (command === "/goal_add") { const g = await getGoals(env); g.goals.push(args); g.updated_at = now(); await kvPut(env, "goals", g); return send(config, chatId, "✅ Goal добавлена."); }
   if (command === "/plan") return send(config, chatId, "🗺 Plan:\n" + (await getPlan(env)).steps.map((s, i) => `${i + 1}. ${s}`).join("\n"));
   if (command === "/plan_set") { await kvPut(env, "plan", { steps: args.split("|").map(x => x.trim()).filter(Boolean), updated_at: now() }); return send(config, chatId, "✅ Plan обновлён."); }
-  if (command === "/tasks") {
-    const activeTasks = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").slice(0, 12);
-    return send(config, chatId, activeTasks.length ? "📋 Active tasks:\n" + activeTasks.map((t, i) => `${i + 1}. ${t.id} p${t.p || 4}: ${t.text}`).join("\n") : "Задач нет.");
-  }
+  if (command === "/tasks") { const activeTasks = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").slice(0, 12); return send(config, chatId, activeTasks.length ? "📋 Active tasks:\n" + activeTasks.map((t, i) => `${i + 1}. ${t.id} p${t.p || 4}: ${t.text}`).join("\n") : "Задач нет."); }
   if (command === "/addtask") { const items = await arrayStore(env, "tasks"); const task = { id: makeId("task"), text: args, p: 4, status: "todo", created_at: now() }; items.push(task); await saveArray(env, "tasks", items, 120); return send(config, chatId, `✅ Добавил ${task.id}`); }
   if (command === "/task_done") { const items = await arrayStore(env, "tasks"); const active = items.filter(t => t.status !== "done"); const task = active[(parseInt(args, 10) || 1) - 1]; if (!task) return send(config, chatId, "Не нашёл задачу."); task.status = "done"; task.done_at = now(); await saveArray(env, "tasks", items, 120); return send(config, chatId, `✅ Закрыл: ${task.text}`); }
   if (command === "/next") { const task = (await arrayStore(env, "tasks")).filter(t => t.status !== "done").sort((a, b) => (a.p || 9) - (b.p || 9))[0]; const firstPlan = (await getPlan(env)).steps[0]; return send(config, chatId, `⏭ Next:\n${task ? `Источник: tasks\nШаг: ${task.text}` : `Источник: plan\nШаг: ${firstPlan || "плана нет"}`}`); }
@@ -414,11 +402,11 @@ async function handleCommand(env, config, message) {
   if (command === "/approve" || command === "/reject") { const proposals = await arrayStore(env, "proposals"); const p = findProposal(proposals, args); if (!p) return send(config, chatId, "Не нашёл proposal."); p.status = command === "/approve" ? "approved" : "rejected"; p.updated_at = now(); await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ ${p.status}: ${p.id}`); }
   if (command === "/patch_auto_target") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal) return send(config, chatId, "Не нашёл proposal."); const active = await activeTarget(config); proposal.file_path = active.effective.path; proposal.patch_draft = null; proposal.code_draft = null; proposal.gate = { passed: true, active_target: active.effective.path, sha: active.effective.sha, at: now() }; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Auto target:\n- ${active.effective.path}\nТеперь: /patch_preview ${proposal.id}`); }
   if (command === "/patch_preview") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal) return send(config, chatId, "Не нашёл proposal."); const file = await githubFile(config, proposal.file_path || (await activeTarget(config)).effective.path); proposal.file_path = file.path; proposal.patch_draft = { target_file: file.path, current_sha: file.sha, intent: proposal.request, risk: "low", proposed_changes: ["deterministic safe change only"], test_plan: ["/status", "/help", "/health_check"], created_at: now() }; proposal.status = "draft_ready"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `🧩 Patch draft ${proposal.id}:\n- target: ${file.path}\n- sha: ${file.sha.slice(0, 12)}\n- risk: low\nДальше: /code_preview ${proposal.id}`); }
-  if (command === "/code_preview") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal || !proposal.patch_draft) return send(config, chatId, "Нет proposal/patch_draft."); const active = await activeTarget(config); if (isRuntimeVisibleProposal(proposal) && proposal.patch_draft.target_file !== active.effective.path) return send(config, chatId, `⛔ target устарел. Сделай: /patch_auto_target ${proposal.id}`); const draft = buildCodeDraft(proposal, active.effective); if (draft.already) { proposal.status = "already_applied"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Уже применено: ${draft.summary}\nApply не нужен.`); } proposal.code_draft = draft.code_draft; proposal.status = "code_draft_ready"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `🧬 Code draft ${proposal.id}:\n- target: ${active.effective.path}\n- sha: ${active.effective.sha.slice(0, 12)}\n- validation: valid ✅\n/code_show ${proposal.id}`); }
+  if (command === "/code_preview") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal || !proposal.patch_draft) return send(config, chatId, "Нет proposal/patch_draft."); const active = await activeTarget(config); const draft = buildCodeDraft(proposal, active.effective); if (draft.already) { proposal.status = "already_applied"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Уже применено: ${draft.summary}\nApply не нужен.`); } proposal.code_draft = draft.code_draft; proposal.status = "code_draft_ready"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `🧬 Code draft ${proposal.id}:\n- target: ${active.effective.path}\n- sha: ${active.effective.sha.slice(0, 12)}\n- validation: valid ✅\n/code_show ${proposal.id}`); }
   if (command === "/code_show") { const proposal = findProposal(await arrayStore(env, "proposals"), args); return send(config, chatId, proposal?.code_draft ? `🧬 Code draft ${proposal.id}:\n${clip(proposal.code_draft.unified_diff, 2500)}` : "Code draft нет."); }
   if (command === "/code_check" || command === "/apply_check") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal) return send(config, chatId, "Не нашёл proposal."); if (proposal.status === "already_applied") return send(config, chatId, `✅ Already applied: ${proposal.id}\nApply не нужен.`); const active = await activeTarget(config); const blockers = []; if (!proposal.code_draft) blockers.push("code_draft missing"); if (proposal.code_draft?.target_file !== active.effective.path) blockers.push(`target ${proposal.code_draft?.target_file} != active ${active.effective.path}`); if (proposal.code_draft?.current_sha !== active.effective.sha) blockers.push("sha mismatch"); let patched = null; if (!blockers.length) { patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff); if (patched === active.effective.content) blockers.push("no-op diff"); } return send(config, chatId, [`🔐 Apply check ${proposal.id}:`, `- target: ${active.effective.path}`, `- code approved: ${proposal.code_approved_at ? "yes ✅" : "no ⛔"}`, `- diff applies: ${patched ? "yes ✅" : "no/blocked"}`, "", blockers.length ? "Blockers:\n- " + blockers.join("\n- ") : `Blockers: none\nNext: ${proposal.code_approved_at ? `/apply_confirm ${proposal.id}` : `/code_approve ${proposal.id}`}`].join("\n")); }
   if (command === "/code_approve") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal?.code_draft) return send(config, chatId, "Нет code_draft."); proposal.code_approved_at = now(); proposal.status = "code_approved"; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Code approved: ${proposal.id}\nТеперь: /apply_check ${proposal.id}`); }
-  if (command === "/apply_confirm") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal?.code_draft) return send(config, chatId, "Нет code_draft."); if (!proposal.code_approved_at) return send(config, chatId, `⛔ Сначала /code_approve ${proposal.id}`); const active = await activeTarget(config); if (proposal.code_draft.target_file !== active.effective.path || proposal.code_draft.current_sha !== active.effective.sha) return send(config, chatId, "⛔ target/sha mismatch. Apply blocked."); const patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff); if (patched === active.effective.content) return send(config, chatId, "⛔ no-op diff. Apply blocked."); const result = await githubWrite(config, active.effective.path, active.effective.sha, patched, `MiniSkynet v4.6.1 apply ${proposal.id}: ${proposal.code_draft.summary}`); proposal.status = "applied"; proposal.applied_at = now(); proposal.apply_result = { path: active.effective.path, commit_sha: result.commit_sha, content_sha: result.content_sha, old_sha: active.effective.sha }; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Applied:\n- file: ${active.effective.path}\n- commit: ${result.commit_sha}\nЖди deploy, потом /post_apply_verify ${proposal.id}`); }
+  if (command === "/apply_confirm") { const proposals = await arrayStore(env, "proposals"); const proposal = findProposal(proposals, args); if (!proposal?.code_draft) return send(config, chatId, "Нет code_draft."); if (!proposal.code_approved_at) return send(config, chatId, `⛔ Сначала /code_approve ${proposal.id}`); const active = await activeTarget(config); if (proposal.code_draft.target_file !== active.effective.path || proposal.code_draft.current_sha !== active.effective.sha) return send(config, chatId, "⛔ target/sha mismatch. Apply blocked."); const patched = applyFullFileDiff(active.effective.content, proposal.code_draft.unified_diff); if (patched === active.effective.content) return send(config, chatId, "⛔ no-op diff. Apply blocked."); const result = await githubWrite(config, active.effective.path, active.effective.sha, patched, `MiniSkynet v4.6.2 apply ${proposal.id}: ${proposal.code_draft.summary}`); proposal.status = "applied"; proposal.applied_at = now(); proposal.apply_result = { path: active.effective.path, commit_sha: result.commit_sha, content_sha: result.content_sha, old_sha: active.effective.sha }; await saveArray(env, "proposals", proposals, 50); return send(config, chatId, `✅ Applied:\n- file: ${active.effective.path}\n- commit: ${result.commit_sha}\nЖди deploy, потом /post_apply_verify ${proposal.id}`); }
   if (command === "/apply_status") { const proposal = findProposal(await arrayStore(env, "proposals"), args); return send(config, chatId, proposal ? `🚀 Apply status ${proposal.id}:\n- status: ${proposal.status}\n- applied: ${proposal.applied_at || "no"}\n- commit: ${proposal.apply_result?.commit_sha || "—"}\n- verified: ${proposal.post_apply_verify?.ok ? "yes ✅" : "no"}` : "Не нашёл proposal."); }
   return send(config, chatId, `Не знаю команду ${command}. /help — список. Модель не вызываю.`);
 }
@@ -440,7 +428,7 @@ async function handleTelegram(request, env) {
     await handleCommand(env, config, message);
     return json({ ok: true, command: message.command, version: VERSION });
   }
-  await send(config, message.chatId, "Core v4.6.1 online. Auto propose pipeline active. Финальная запись только через /apply_confirm. /help");
+  await send(config, message.chatId, "Core v4.6.2 online. Auto propose pipeline active. Финальная запись только через /apply_confirm. /help");
   return json({ ok: true, text_mode: "rescue" });
 }
 
