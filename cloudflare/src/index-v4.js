@@ -1,5 +1,5 @@
 
-const VERSION="v5.0-clean-core-2026-07-03";
+const VERSION="v5.1-think-dialog-2026-07-03";
 const DEFAULT_REPO="sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH="main";
 const DEFAULT_WORKER_URL="https://miniskynet-core.sromanuk16.workers.dev";
@@ -30,7 +30,7 @@ function parse(update){
   let command=null,args="";
   if(text.startsWith("/")){
     const i=text.indexOf(" ");
-    command=(i<0?text:text.slice(0,i)).replace(/@\w+$/,"/path").replace("/path","").toLowerCase();
+    command=(i<0?text:text.slice(0,i)).replace(/@\w+$/,").toLowerCase();
     args=i<0?"":text.slice(i+1).trim();
   }
   return{chatId:m.chat?.id,userId:m.from?.id,text,command,args};
@@ -46,6 +46,7 @@ async function config(env){
   return{
     telegram:String(env.TELEGRAM_BOT_TOKEN||"").trim()||await kvText(env,"config:TELEGRAM_BOT_TOKEN"),
     owner:String(env.TELEGRAM_ALLOWED_USER_ID||"").trim()||await kvText(env,"config:TELEGRAM_ALLOWED_USER_ID"),
+    openrouter:String(env.OPENROUTER_API_KEY||"").trim()||await kvText(env,"config:OPENROUTER_API_KEY"),
     gh:String(env.GITHUB_TOKEN||"").trim()||await kvText(env,"config:GITHUB_TOKEN"),
     repo:String(env.GITHUB_REPO||"").trim()||await kvText(env,"config:GITHUB_REPO")||DEFAULT_REPO,
     branch:String(env.GITHUB_BRANCH||"").trim()||await kvText(env,"config:GITHUB_BRANCH")||DEFAULT_BRANCH,
@@ -67,7 +68,7 @@ const pathUrl=p=>clean(p).split("/").map(encodeURIComponent).join("/");
 
 async function readFile(c,path){
   const p=safe(path);if(!p)throw new Error("unsafe path");
-  const headers={accept:"application/vnd.github+json","user-agent":"MiniSkynet-v5"};
+  const headers={accept:"application/vnd.github+json","user-agent":"MiniSkynet-v51"};
   if(c.gh)headers.authorization=`Bearer ${c.gh}`;
   const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}?ref=${encodeURIComponent(c.branch)}`,{headers});
   const d=await r.json().catch(()=>({}));
@@ -78,7 +79,7 @@ async function readFile(c,path){
 async function writeFile(c,path,sha,content,message){
   if(!c.gh)throw new Error("GITHUB_TOKEN missing");
   const p=safe(path);if(!p)throw new Error("unsafe path");
-  const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}`,{method:"PUT",headers:{accept:"application/vnd.github+json","content-type":"application/json","user-agent":"MiniSkynet-v5",authorization:`Bearer ${c.gh}`},body:JSON.stringify({message,content:b64e(content),sha,branch:c.branch})});
+  const r=await fetch(`https://api.github.com/repos/${c.repo}/contents/${pathUrl(p)}`,{method:"PUT",headers:{accept:"application/vnd.github+json","content-type":"application/json","user-agent":"MiniSkynet-v51",authorization:`Bearer ${c.gh}`},body:JSON.stringify({message,content:b64e(content),sha,branch:c.branch})});
   const d=await r.json().catch(()=>({}));
   if(!r.ok)throw new Error(`GitHub write ${r.status}: ${d.message||"request failed"}`);
   return{commit_sha:d?.commit?.sha||"",content_sha:d?.content?.sha||""};
@@ -87,14 +88,47 @@ function mainFromWrangler(s){const m=String(s||"").match(/^main\s*=\s*["']([^"']
 async function activeTarget(c){const wr=await readFile(c,"cloudflare/wrangler.toml");const main=mainFromWrangler(wr.content);if(!main)throw new Error("wrangler main not found");return{main,file:await readFile(c,main)}}
 function findProp(list,key){const k=String(key||"").trim();return list.find(p=>p.id===k||String(p.id||"").startsWith(k))}
 
-function health(){return{ok:true,version:VERSION,core:"v5-clean",runtime:"single-file",onion_imports:false,proposal_fsm:true,github_write:"confirm-only",verification:"proposal-specific",markers:SELF_APPLY_MARKERS}}
+function health(){return{ok:true,version:VERSION,core:"v5-clean",runtime:"single-file",onion_imports:false,proposal_fsm:true,github_write:"confirm-only",verification:"proposal-specific",think_dialog:true,markers:SELF_APPLY_MARKERS}}
 function help(){
-  return["/start /help /status",`Version: ${VERSION}`,"","Core:","/self /self_set текст","/goals /goal_add текст","/plan /plan_set шаг1 | шаг2","/tasks /addtask текст /task_done n /next","/memory /memory_score","/think текст","","Repo:","/repo_config /repo_file path /repo_scan /active_target","","Self-apply:","/propose текст — сам готовит draft/check","/apply_confirm id — единственная команда записи в GitHub","/post_apply_verify id — проверяет конкретный результат","/proposals /show id /reject id /proposals_clean","/code_preview id /code_show id /apply_check id /apply_status id","","Markers:",...SELF_APPLY_MARKERS.map(x=>`- marker: ${x}`)].join("\n");
+  return["/start /help /status",`Version: ${VERSION}`,"","Core:","/self /self_set текст","/goals /goal_add текст","/plan /plan_set шаг1 | шаг2","/tasks /addtask текст /task_done n /next","/memory /memory_score","/think текст","обычный текст = live dialog через think","","Repo:","/repo_config /repo_file path /repo_scan /active_target","","Self-apply:","/propose текст — сам готовит draft/check","/apply_confirm id — единственная команда записи в GitHub","/post_apply_verify id — проверяет конкретный результат","/proposals /show id /reject id /proposals_clean","/code_preview id /code_show id /apply_check id /apply_status id","","Markers:",...SELF_APPLY_MARKERS.map(x=>`- marker: ${x}`)].join("\n");
 }
 
 async function getSelf(env){return kvGet(env,"self",{text:"Я MiniSkynet Core v5 — личный инженерный агент Сергея. Читаю repo перед изменениями и пишу в GitHub только после /apply_confirm.",updated_at:now()})}
-async function getGoals(env){return kvGet(env,"goals",{goals:["Быть личным инженерным агентом Сергея","Читать repo перед изменениями","Делать proposal → draft → apply → verify","Не возвращаться к onion/layer hell"],updated_at:now()})}
-async function getPlan(env){return kvGet(env,"plan",{steps:["Проверить Core v5","Стабилизировать proposal/apply/verify","Вернуть нормальный think/dialog","Расширять реальные инженерные действия"],updated_at:now()})}
+async function getGoals(env){return kvGet(env,"goals",{goals:["Быть личным инженерным агентом Сергея","Понимать обычный диалог","Читать repo перед изменениями","Делать proposal → draft → apply → verify","Не возвращаться к onion/layer hell"],updated_at:now()})}
+async function getPlan(env){return kvGet(env,"plan",{steps:["Проверить Core v5.1 think/dialog","Сохранять только полезную память","Расширять реальные инженерные действия"],updated_at:now()})}
+
+function memoryQuality(text){
+  const t=String(text||"").trim();
+  if(t.length<12)return 0;
+  if(/^(ок|да|нет|делай|дальше|спасибо|понял)$/i.test(t))return 0;
+  let score=40;
+  if(/запомни|важно|правило|цель|план|проект|архитект|огранич/i.test(t))score+=35;
+  if(t.length>80)score+=15;
+  return Math.min(100,score);
+}
+async function maybeRemember(env,userText,answer){
+  const score=memoryQuality(userText);
+  if(score<70)return null;
+  const mem=await arr(env,"memories");
+  const item={id:uid("mem"),type:/правило|запомни|важно/i.test(userText)?"rule":"note",score,text:clip(userText,300),answer_hint:clip(answer,180),created_at:now()};
+  mem.push(item);
+  await saveArr(env,"memories",mem,200);
+  return item;
+}
+async function runThink(env,c,userText){
+  if(!c.openrouter)return"⚠️ Think/dialog не включён: нет OPENROUTER_API_KEY в env или KV config:OPENROUTER_API_KEY.";
+  const self=await getSelf(env),goals=await getGoals(env),plan=await getPlan(env);
+  const mem=(await arr(env,"memories")).slice(-8).map(m=>`- [${m.type||"note"}/${m.score||0}] ${m.text}`).join("\n")||"- пусто";
+  const tasks=(await arr(env,"tasks")).filter(t=>t.status!=="done").slice(0,6).map(t=>`- ${t.text}`).join("\n")||"- нет";
+  const system=["Ты MiniSkynet Core v5.1, облачная Лондон Сергея в Telegram.","Пиши по-русски, коротко, живо, на ты.","Твоя роль: личный инженерный агент. Не болталка.","Не обещай запись в GitHub без /propose и /apply_confirm.","Если нужна правка кода — предложи одну безопасную следующую команду.","Если вопрос обычный — отвечай нормально без лишней схемы."].join("\n");
+  const context=[`Self: ${self.text}`,`Goals:\n${goals.goals.map((g,i)=>`${i+1}. ${g}`).join("\n")}`,`Plan:\n${plan.steps.map((s,i)=>`${i+1}. ${s}`).join("\n")}`,`Active tasks:\n${tasks}`,`Memory:\n${mem}`].join("\n\n");
+  const r=await fetch("https://openrouter.ai/api/v1/chat/completions",{method:"POST",headers:{"content-type":"application/json",authorization:`Bearer ${c.openrouter}`},body:JSON.stringify({model:c.model,messages:[{role:"system",content:system},{role:"user",content:`${context}\n\nСообщение Сергея:\n${userText}`}],max_tokens:650,temperature:0.4})});
+  const data=await r.json().catch(()=>({}));
+  if(!r.ok)return`OpenRouter error ${r.status}: ${data?.error?.message||"request failed"}`;
+  const answer=data?.choices?.[0]?.message?.content?.trim()||"Пустой ответ модели.";
+  await maybeRemember(env,userText,answer);
+  return answer;
+}
 
 function markerRange(src){const start=src.indexOf("const SELF_APPLY_MARKERS=[");if(start<0)return null;const end=src.indexOf("];",start);return end>start?{start,end,block:src.slice(start,end+2)}:null}
 function hasMarker(src,marker){const r=markerRange(src);return!!(r&&r.block.includes(JSON.stringify(marker)))}
@@ -149,11 +183,11 @@ async function verify(c,p){
 }
 
 async function handle(env,c,m){
-  const{chatId,command,args}=m;
-  if(command==="/start")return send(c,chatId,`✅ MiniSkynet Core v5 online.\nversion: ${VERSION}\n/help — команды`);
+  const{chatId,command,args,text}=m;
+  if(command==="/start")return send(c,chatId,`✅ MiniSkynet Core v5.1 online.\nversion: ${VERSION}\n/help — команды`);
   if(command==="/help")return send(c,chatId,help());
-  if(command==="/status"){const tasks=await arr(env,"tasks"),mem=await arr(env,"memories"),props=await arr(env,"proposals");return send(c,chatId,["📡 MiniSkynet Core v5 status",`- version: ${VERSION}`,"- runtime: single-file flat core","- router: strict","- proposal FSM: active","- GitHub write: /apply_confirm only","- verification: proposal-specific",`- tasks: active=${tasks.filter(t=>t.status!=="done").length}, done=${tasks.filter(t=>t.status==="done").length}`,`- memory: ${mem.length}`,`- proposals: ${props.length}`,`- model: ${c.model}`].join("\n"))}
-  if(command==="/health_check"||command==="/deploy_check")return send(c,chatId,`🩺 Health check v5:\n- local version: ${VERSION}\n- local runtime: PASS ✅\n- markers: ${SELF_APPLY_MARKERS.length}`);
+  if(command==="/status"){const tasks=await arr(env,"tasks"),mem=await arr(env,"memories"),props=await arr(env,"proposals");return send(c,chatId,["📡 MiniSkynet Core v5.1 status",`- version: ${VERSION}`,"- runtime: single-file flat core","- router: strict","- proposal FSM: active","- GitHub write: /apply_confirm only","- verification: proposal-specific",`- think/dialog: ${c.openrouter?"active ✅":"no key ⛔"}`,`- tasks: active=${tasks.filter(t=>t.status!=="done").length}, done=${tasks.filter(t=>t.status==="done").length}`,`- memory: ${mem.length}`,`- proposals: ${props.length}`,`- model: ${c.model}`].join("\n"))}
+  if(command==="/health_check"||command==="/deploy_check")return send(c,chatId,`🩺 Health check v5.1:\n- local version: ${VERSION}\n- local runtime: PASS ✅\n- think/dialog: ${c.openrouter?"active ✅":"no key ⛔"}\n- markers: ${SELF_APPLY_MARKERS.length}`);
   if(command==="/self")return send(c,chatId,`🧠 Self:\n${(await getSelf(env)).text}\n\nИзменить: /self_set текст`);
   if(command==="/self_set"){await kvPut(env,"self",{text:args,updated_at:now()});return send(c,chatId,"✅ Self обновлён.")}
   if(command==="/goals")return send(c,chatId,"🎯 Goals:\n"+(await getGoals(env)).goals.map((g,i)=>`${i+1}. ${g}`).join("\n"));
@@ -166,8 +200,8 @@ async function handle(env,c,m){
   if(command==="/next"){const t=(await arr(env,"tasks")).filter(x=>x.status!=="done")[0],p=await getPlan(env);return send(c,chatId,`⏭ Next:\n${t?`Источник: tasks\nШаг: ${t.text}`:`Источник: plan\nШаг: ${p.steps[0]||"нет"}`}`)}
   if(command==="/memory"){const mem=await arr(env,"memories");return send(c,chatId,mem.length?"🧠 Memory:\n"+mem.slice(-10).map(x=>`- [${x.type||"note"}/${x.score||0}] ${x.text}`).join("\n"):"Память пустая.")}
   if(command==="/memory_score"){const mem=await arr(env,"memories"),avg=mem.length?Math.round(mem.reduce((a,b)=>a+(b.score||0),0)/mem.length):0;return send(c,chatId,`🧠 Memory Quality:\n- всего: ${mem.length}\n- avg: ${avg}/100`)}
-  if(command==="/think"||!command){return send(c,chatId,"Think в Core v5 включим следующим шагом. Сейчас стабилизирован чистый контур proposal/apply/verify.")}
-  if(command==="/repo_config")return send(c,chatId,`🔎 Repo config:\n- repo: ${c.repo}\n- branch: ${c.branch}\n- GitHub token: ${c.gh?"есть ✅":"нет ⛔"}`);
+  if(command==="/think"||!command)return send(c,chatId,await runThink(env,c,args||text));
+  if(command==="/repo_config")return send(c,chatId,`🔎 Repo config:\n- repo: ${c.repo}\n- branch: ${c.branch}\n- GitHub token: ${c.gh?"есть ✅":"нет ⛔"}\n- OpenRouter key: ${c.openrouter?"есть ✅":"нет ⛔"}`);
   if(command==="/repo_file"){const f=await readFile(c,args);return send(c,chatId,`📄 ${f.path}\n- size: ${f.size}\n- sha: ${f.sha.slice(0,12)}\n\n${clip(f.content,1400)}`)}
   if(command==="/repo_scan"){const out=[];for(const p of["cloudflare/wrangler.toml","cloudflare/src/index-v4.js"]){try{const f=await readFile(c,p);out.push(`✅ ${p} size=${f.size} sha=${f.sha.slice(0,10)}`)}catch(e){out.push(`❌ ${p}: ${e.message}`)}}return send(c,chatId,"🧭 Repo scan:\n"+out.join("\n"))}
   if(command==="/active_target"){const a=await activeTarget(c);return send(c,chatId,`🎯 Active target:\n- wrangler main: ${a.main}\n- effective: ${a.file.path}\n- sha: ${a.file.sha.slice(0,12)}\n- size: ${a.file.size}`)}
@@ -177,7 +211,7 @@ async function handle(env,c,m){
   if(command==="/reject"){const props=await arr(env,"proposals"),p=findProp(props,args);if(!p)return send(c,chatId,"Не нашёл proposal.");p.state="rejected";await saveArr(env,"proposals",props,80);return send(c,chatId,`✅ rejected: ${p.id}`)}
   if(command==="/code_preview"||command==="/apply_check"){const props=await arr(env,"proposals"),p=findProp(props,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const f=await freshDraft(c,p);await saveArr(env,"proposals",props,80);if(f.already)return send(c,chatId,`✅ Уже применено: ${f.summary}\nApply не нужен.`);if(f.blocked)return send(c,chatId,`⛔ blocked: ${f.reason}`);const changes=p.code_draft.new_content!==f.active.file.content;return send(c,chatId,`🔐 Apply check ${p.id}\n- state: ${p.state}\n- target: ${f.active.file.path}\n- expected: ${p.expected}\n- rebuilt: ${f.rebuilt?"yes ✅":"no"}\n- changes: ${changes?"yes ✅":"no ⛔"}\n${changes?`Next: /apply_confirm ${p.id}`:"Blocker: no changes"}`)}
   if(command==="/code_show"){const p=findProp(await arr(env,"proposals"),args);return send(c,chatId,p?.code_draft?`🧬 Code draft ${p.id}\nsummary: ${p.code_draft.summary}\ntarget: ${p.code_draft.target}\nexpected: ${p.code_draft.expected}\n\n${clip(p.code_draft.new_content,2600)}`:"Code draft нет.")}
-  if(command==="/apply_confirm"){const props=await arr(env,"proposals"),p=findProp(props,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const f=await freshDraft(c,p);if(f.already){await saveArr(env,"proposals",props,80);return send(c,chatId,`✅ Уже применено: ${f.summary}\nApply не нужен.`)}if(f.blocked){await saveArr(env,"proposals",props,80);return send(c,chatId,`⛔ blocked: ${f.reason}`)}if(!p.code_draft||p.code_draft.new_content===f.active.file.content)return send(c,chatId,"⛔ no-op или нет draft. Apply blocked.");const res=await writeFile(c,f.active.file.path,f.active.file.sha,p.code_draft.new_content,`MiniSkynet v5 apply ${p.id}: ${p.code_draft.summary}`);p.state="applied";p.applied_at=now();p.apply_result={path:f.active.file.path,old_sha:f.active.file.sha,content_sha:res.content_sha,commit_sha:res.commit_sha,rebuilt:f.rebuilt};await saveArr(env,"proposals",props,80);return send(c,chatId,`✅ Applied:\n- proposal: ${p.id}\n- file: ${f.active.file.path}\n- expected: ${p.expected}\n- commit: ${res.commit_sha}\n\nПосле deploy: /post_apply_verify ${p.id}`)}
+  if(command==="/apply_confirm"){const props=await arr(env,"proposals"),p=findProp(props,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const f=await freshDraft(c,p);if(f.already){await saveArr(env,"proposals",props,80);return send(c,chatId,`✅ Уже применено: ${f.summary}\nApply не нужен.`)}if(f.blocked){await saveArr(env,"proposals",props,80);return send(c,chatId,`⛔ blocked: ${f.reason}`)}if(!p.code_draft||p.code_draft.new_content===f.active.file.content)return send(c,chatId,"⛔ no-op или нет draft. Apply blocked.");const res=await writeFile(c,f.active.file.path,f.active.file.sha,p.code_draft.new_content,`MiniSkynet v5.1 apply ${p.id}: ${p.code_draft.summary}`);p.state="applied";p.applied_at=now();p.apply_result={path:f.active.file.path,old_sha:f.active.file.sha,content_sha:res.content_sha,commit_sha:res.commit_sha,rebuilt:f.rebuilt};await saveArr(env,"proposals",props,80);return send(c,chatId,`✅ Applied:\n- proposal: ${p.id}\n- file: ${f.active.file.path}\n- expected: ${p.expected}\n- commit: ${res.commit_sha}\n\nПосле deploy: /post_apply_verify ${p.id}`)}
   if(command==="/post_apply_verify"){const props=await arr(env,"proposals"),p=findProp(props,args);if(!p)return send(c,chatId,"Не нашёл proposal.");const v=await verify(c,p);p.verify=v;p.state=v.ok?"verified":"partial";await saveArr(env,"proposals",props,80);return send(c,chatId,`🧪 Post-apply verify ${p.id}\n- state: ${p.state}\n- expected: ${v.expected}\n- marker: ${v.marker}\n- checked file: ${v.file}\n- marker in source: ${v.marker_ok?"yes ✅":"no ⛔"}\n- expected in generated help: ${v.help_ok?"yes ✅":"no ⛔"}\n- result: ${v.ok?"PASS ✅":"PARTIAL/FAIL ⚠️"}`)}
   if(command==="/apply_status"){const p=findProp(await arr(env,"proposals"),args);return send(c,chatId,p?`🚀 Apply status ${p.id}\n- state: ${p.state}\n- expected: ${p.expected||"—"}\n- applied: ${p.applied_at||"no"}\n- commit: ${p.apply_result?.commit_sha||"—"}\n- verified: ${p.verify?.ok?"yes ✅":"no"}`:"Не нашёл proposal.")}
   if(command==="/proposals_clean"){const props=await arr(env,"proposals"),keep=props.filter(p=>["ready_for_confirm","applied","verified"].includes(p.state)).slice(-30);await saveArr(env,"proposals",keep,80);return send(c,chatId,`🧹 Proposals cleaned: было ${props.length}, стало ${keep.length}`)}
@@ -194,7 +228,7 @@ async function telegram(request,env){
     await handle(env,c,msg);
     return out({ok:true,command:msg.command||"text",version:VERSION});
   }catch(e){
-    await send(c,msg.chatId,`❌ Core v5 error: ${clip(e.message||e,1000)}`);
+    await send(c,msg.chatId,`❌ Core v5.1 error: ${clip(e.message||e,1000)}`);
     return out({ok:false,error:String(e.message||e),version:VERSION},500);
   }
 }
