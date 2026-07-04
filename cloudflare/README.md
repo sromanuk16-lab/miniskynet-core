@@ -38,15 +38,17 @@ KV namespace: MINISKYNET
 В KV namespace `MINISKYNET` добавь entries:
 
 ```text
-config:TELEGRAM_BOT_TOKEN = token from BotFather
-config:OPENROUTER_API_KEY = OpenRouter key
-config:SETUP_SECRET = miniskynet-setup-2026
+config:TELEGRAM_BOT_TOKEN = <token from BotFather>
+config:OPENROUTER_API_KEY = <OpenRouter key>
+config:SETUP_SECRET = <random setup secret stored only in KV>
 ```
+
+Не коммить реальные токены, setup secrets, webhook secrets или рабочие setup-webhook URL в репозиторий.
 
 Опционально позже:
 
 ```text
-config:TELEGRAM_ALLOWED_USER_ID = your Telegram user id
+config:TELEGRAM_ALLOWED_USER_ID = <your Telegram user id>
 config:OPENROUTER_MODEL_CHEAP = openai/gpt-4o-mini
 config:MAX_DAILY_COST_USD = 0.50
 config:MAX_CYCLES_PER_DAY = 20
@@ -60,19 +62,20 @@ Worker v0.1.1 сначала читает обычные Cloudflare env vars, а
 После деплоя открой в браузере:
 
 ```text
-https://YOUR_WORKER_URL/setup-webhook?secret=YOUR_SETUP_SECRET
+https://<YOUR_WORKER_URL>/setup-webhook?secret=<YOUR_SETUP_SECRET>
 ```
 
-Например:
+Где:
 
 ```text
-https://miniskynet-core.sromanuk16.workers.dev/setup-webhook?secret=miniskynet-setup-2026
+<YOUR_WORKER_URL> = адрес твоего Cloudflare Worker
+<YOUR_SETUP_SECRET> = значение config:SETUP_SECRET из KV
 ```
 
 Worker сам вызовет Telegram `setWebhook` и привяжет Telegram-бота к адресу:
 
 ```text
-https://YOUR_WORKER_URL/telegram
+https://<YOUR_WORKER_URL>/telegram
 ```
 
 ## Важная логика
