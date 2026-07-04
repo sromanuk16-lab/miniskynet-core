@@ -1,4 +1,4 @@
-const VERSION="v5.1.7-live-pending-v2-2026-07-04";
+const VERSION="v5.1.8-live-pending-alias-2026-07-04";
 const DEFAULT_REPO="sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH="main";
 const DEFAULT_WORKER_URL="https://miniskynet-core.sromanuk16.workers.dev";
@@ -99,7 +99,7 @@ async function handle(env,c,m){const{chatId,command,args,text}=m;
   if(command==="/system_scan")return send(c,chatId,await systemScan(env,c));
   if(command==="/core_next")return send(c,chatId,await coreNext(env,c));
   if(command==="/live_pending_v2")return send(c,chatId,await livePendingV2(env));
-  if(command==="/live_pending")return send(c,chatId,await renderRichCommand(env,c,"check","live"));
+  if(command==="/live_pending")return send(c,chatId,await livePendingV2(env));
   if(command==="/project_map")return send(c,chatId,"🗺️ Project Map v1: repo=sromanuk16-lab/miniskynet-core; structure: cloudflare config + active worker runtime; active target=cloudflare/src/index-v4.js; wrangler main -> cloudflare/src/index-v4.js; protected files: worker config risk=critical, active target risk=critical; config files: worker config risk=high; runtime files: cloudflare/src/index-v4.js risk=critical; report-only files: none; unknown files: none; mode=report only, no removal, no config changes.");
   if(command==="/cleanup_scan")return send(c,chatId,"🧹 Cleanup Scan v1: active target cloudflare/src/index-v4.js; wrangler main -> cloudflare/src/index-v4.js; protected: worker config + active target; legacy/wrapper/old candidates: none from current repo scan; risk: low; mode: report only, no file changes.");
   if(command==="/rollback_last")return send(c,chatId,await rollbackLast(env,c));
