@@ -4,6 +4,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   smoke:
     runs-on: ubuntu-latest
@@ -16,3 +19,13 @@ jobs:
         run: pip install -r requirements.txt
       - name: Run smoke test
         run: python scripts/smoke_test.py
+
+  node-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Check active Cloudflare Worker syntax
+        run: node --check cloudflare/src/index-v4.js
