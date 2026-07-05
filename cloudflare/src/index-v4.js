@@ -1,10 +1,10 @@
-const VERSION="v5.6.28-dynamic-capability-gap-resolver-v2-2026-07-05";
+const VERSION="v5.6.29-dynamic-gap-module-naming-hotfix-v1-2026-07-05";
 const DEFAULT_REPO="sromanuk16-lab/miniskynet-core";
 const DEFAULT_BRANCH="main";
 const DEFAULT_WORKER_URL="https://miniskynet-core.sromanuk16.workers.dev";
 const H={"content-type":"application/json; charset=utf-8"};
 const B_MANUAL="manual",B_JS="arbitrary"+"_"+"js",B_WRANGLER="wrangler"+"."+"toml",B_EXT="external"+"_"+"fetch",B_SEC="secrets"+"_"+"write",B_DEL="delete"+"_"+"file";
-const SELF_APPLY_MARKERS=["v5 clean core baseline","single-file flat runtime","proposal FSM","confirm-only GitHub write","proposal-specific verification","v5 first clean self-apply marker","marker v5 core_check_bridge","safe_command_add v1 static","rollback v1 guarded","live runtime verification v1 manual","rich command templates v1 whitelist","capability registry v1","capability forbidden token guard v1","patch planner v1 diff syntax safety","patch planner v1.1 regex syntax safety","native live_pending_v2 read-only","cost guard v1 runThink","project_map v2 dynamic GitHub listing","cleanup_scan v2 dynamic GitHub listing","cleanup_plan v1 read-only","cleanup_plan v1.1 compact output","cleanup_manifest v1 read-only","cleanup_manifest v1.1 paged output","capability registry v2 multi-file safe actions","cleanup_manifest_save v1 KV snapshot","cleanup_delete_preview v1 read-only","cleanup_delete_prepare v1 KV job","cleanup_delete_job_status v1 read-only","cleanup_delete_executor v1 guarded","cleanup_scan v2.1 runtime candidates","cleanup_rollback_viewer v1 read-only","self_apply v2 native handler templates","live verify automation v2","post_apply_watchdog v1 read-only","proposal cleanup v1 preview confirm","rich templates v2 registry fixed renderers","capability registry v3 risk policy levels","autonomous task loop v1 read-only scheduled","low-risk auto-propose v1 recommendation-only","low-risk auto-apply policy v1 disabled","think context hydration v1 project_state","auto-rollback on live FAIL v1 policy disabled","roadmap lock v1 official stage order","autonomous planner v2 structured next action","roadmap strict stage matching hotfix v1","auto proposal draft v1 text-only recommendations","apply gate v2 pre-apply decision guard","failure lock v1 manual review gate","memory import pipeline v1 preview confirm","human narrator v1 russian state summary","project auditor v1 read-only repo audit","human output mode v1 scheduled briefings","memory trust grounded v1","think code context hydration v1","think real symbol check hotfix v1","real symbol check full source v1","safe autonomy governor v1","natural command router v1","natural command router v3 contextual intent","natural router v3 threshold hotfix v1","llm intent brain action bus v1","llm intent preference hotfix v1","capability gap resolver v1","dynamic capability gap resolver v2"];
+const SELF_APPLY_MARKERS=["v5 clean core baseline","single-file flat runtime","proposal FSM","confirm-only GitHub write","proposal-specific verification","v5 first clean self-apply marker","marker v5 core_check_bridge","safe_command_add v1 static","rollback v1 guarded","live runtime verification v1 manual","rich command templates v1 whitelist","capability registry v1","capability forbidden token guard v1","patch planner v1 diff syntax safety","patch planner v1.1 regex syntax safety","native live_pending_v2 read-only","cost guard v1 runThink","project_map v2 dynamic GitHub listing","cleanup_scan v2 dynamic GitHub listing","cleanup_plan v1 read-only","cleanup_plan v1.1 compact output","cleanup_manifest v1 read-only","cleanup_manifest v1.1 paged output","capability registry v2 multi-file safe actions","cleanup_manifest_save v1 KV snapshot","cleanup_delete_preview v1 read-only","cleanup_delete_prepare v1 KV job","cleanup_delete_job_status v1 read-only","cleanup_delete_executor v1 guarded","cleanup_scan v2.1 runtime candidates","cleanup_rollback_viewer v1 read-only","self_apply v2 native handler templates","live verify automation v2","post_apply_watchdog v1 read-only","proposal cleanup v1 preview confirm","rich templates v2 registry fixed renderers","capability registry v3 risk policy levels","autonomous task loop v1 read-only scheduled","low-risk auto-propose v1 recommendation-only","low-risk auto-apply policy v1 disabled","think context hydration v1 project_state","auto-rollback on live FAIL v1 policy disabled","roadmap lock v1 official stage order","autonomous planner v2 structured next action","roadmap strict stage matching hotfix v1","auto proposal draft v1 text-only recommendations","apply gate v2 pre-apply decision guard","failure lock v1 manual review gate","memory import pipeline v1 preview confirm","human narrator v1 russian state summary","project auditor v1 read-only repo audit","human output mode v1 scheduled briefings","memory trust grounded v1","think code context hydration v1","think real symbol check hotfix v1","real symbol check full source v1","safe autonomy governor v1","natural command router v1","natural command router v3 contextual intent","natural router v3 threshold hotfix v1","llm intent brain action bus v1","llm intent preference hotfix v1","capability gap resolver v1","dynamic capability gap resolver v2","dynamic gap module naming hotfix v1"];
 const CMDS=new Set(["/start","/help","/status","/self","/self_set","/goals","/goal_add","/plan","/plan_set","/tasks","/addtask","/task_done","/next","/memory","/memory_score","/cost_status","/think","/repo_config","/repo_file","/repo_scan","/active_target","/core_check","/system_scan","/core_next","/ping","/skynet_test","/rollback_last","/confirm_rollback","/live_verify","/rich_templates","/native_templates","/capabilities","/cleanup_scan","/cleanup_plan","/cleanup_manifest","/cleanup_manifest_save","/cleanup_manifest_saved","/cleanup_delete_preview","/cleanup_delete_prepare","/cleanup_delete_job","/cleanup_delete_confirm","/cleanup_rollback","/project_map","/post_apply_watchdog","/proposals_clean_confirm","/live_pending","/live_pending_v2","/propose","/proposals","/show","/reject","/code_preview","/code_show","/apply_check","/apply_confirm","/apply_status","/post_apply_verify","/proposals_clean","/health_check","/deploy_check","/alive_status","/project_state","/where_are_we","/memory_import_preview","/memory_import_confirm","/memory_packs","/memory_search","/narrator","/project_audit","/project_audit_file","/briefing","/output_mode_status","/autonomy_status","/autonomy_tick","/natural_router_status","/intent_status","/gap_status","/gap_draft","/memory_summary","/memory_about_me","/memory_project","/memory_rules","/memory_audit"]);
 const RICH_TEMPLATE_REGISTRY={status:{title:"status snapshot",mode:"fixed-render",data:new Set(["core","repo","tasks","memory","proposals","system"])},list:{title:"safe list renderer",mode:"fixed-render",data:new Set(["tasks","goals","memory","proposals","plan"])},report:{title:"safe report renderer",mode:"fixed-render",data:new Set(["core","work","self_apply"])},check:{title:"safe check renderer",mode:"fixed-render",data:new Set(["keys","blockers","active_target","pending","live"])}};
 const RICH_ALLOWED=Object.fromEntries(Object.entries(RICH_TEMPLATE_REGISTRY).map(([k,v])=>[k,v.data]));
@@ -66,7 +66,8 @@ const CAPABILITY_GAP_RESOLVER_V1={
     deep_code_reading:"Code Context Window v1",
     autonomous_code_build:"Safe Builder + Patch Preview v1",
     tests:"Test Runner v1",
-    agent_registry:"Agent / Tool Registry v1"
+    agent_registry:"Agent / Tool Registry v1",
+    version_diff:"Project Version Diff Explainer v1"
   },
   safety:"known gaps use deterministic mapping; unknown gaps use LLM spec draft; creates pending /addtask only; no code apply, no deploy, no direct GitHub write"
 };
@@ -557,7 +558,8 @@ function capabilityGapTaskTextV1(kind,sourceText=""){
     deep_code_reading:"Добавить Code Context Window v1: SKYNET должен читать безопасное окно 80-160 строк вокруг нужной функции/команды, показывать краткое тело без secrets, строить functions-to-change plan для будущего patch.",
     autonomous_code_build:"Добавить Safe Builder + Patch Preview v1: SKYNET должен по инженерной задаче читать нужный код, строить files/functions plan, генерировать patch preview/risk/rollback/test plan и готовить ZIP; без применения без confirm, без deploy, без scheduled GitHub write.",
     tests:"Добавить Test Runner v1: SKYNET должен запускать/имитировать безопасные проверки для Worker: node --check, command smoke plan, live verify checklist, фиксировать PASS/FAIL и предлагать rollback при fail.",
-    agent_registry:"Добавить Agent / Tool Registry v1: SKYNET должен хранить список созданных агентов/инструментов, purpose, allowed inputs/outputs, forbidden actions, risk level, required tests и status."
+    agent_registry:"Добавить Agent / Tool Registry v1: SKYNET должен хранить список созданных агентов/инструментов, purpose, allowed inputs/outputs, forbidden actions, risk level, required tests и status.",
+    version_diff:"Добавить Project Version Diff Explainer v1: SKYNET должен принимать две версии проекта/файлов, строить diff summary, объяснять отличия человеческим языком, выделять risk/changed functions/tests/rollback notes; без auto-apply, без deploy, без direct GitHub write, без secrets, с confirm Сергея."
   };
   return map[kind]||`Добавить недостающую возможность SKYNET: ${s||kind}. Сначала gap analysis, затем safe plan, затем patch preview. Без auto-apply/deploy/secrets.`;
 }
@@ -571,6 +573,7 @@ function capabilityGapDetectV1(intent,text){
   if(/сам.*пиш|сам.*созда|создавал сам|пиши модул|пиши агент|сделай инструмент|safe builder|patch preview|сам это создавал/.test(s))return{kind:"autonomous_code_build",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.autonomous_code_build,confidence:0.92};
   if(/тест|проверяй код|test runner|node --check|smoke/.test(s))return{kind:"tests",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.tests,confidence:0.86};
   if(/реестр агент|registry|tool registry|агенты/.test(s))return{kind:"agent_registry",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.agent_registry,confidence:0.84};
+  if(/(сравн|compare|diff).*(верс|version|проект|файл)|две версии|разниц.*верс|объясн.*разниц/.test(s))return{kind:"version_diff",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.version_diff,confidence:0.90};
   if(intent?.intent==="set_preference")return{kind:"user_preferences",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.user_preferences,confidence:0.90};
   if(intent?.intent==="create_feature"&&!intent.mapped_command)return{kind:"autonomous_code_build",title:CAPABILITY_GAP_RESOLVER_V1.known_gaps.autonomous_code_build,confidence:0.75};
   return null;
@@ -585,7 +588,18 @@ function capabilityGapNeedsDynamicV2(intent,text){
   return false;
 }
 function capabilityGapSafeNameV2(name){
-  return clip(String(name||"Custom Capability").replace(/[^\p{L}\p{N}\s_+\-/.]/gu,"").replace(/\s+/g," ").trim(),80)||"Custom Capability";
+  let n=clip(String(name||"Custom Capability v1").replace(/[^\p{L}\p{N}\s_+\-/.]/gu,"").replace(/\s+/g," ").trim(),80)||"Custom Capability v1";
+  if(!/\bv\d+\b/i.test(n))n=`${n} v1`;
+  return n;
+}
+function capabilityGapTaskEnsureNameV2(spec,text){
+  const name=capabilityGapSafeNameV2(spec.capability_name);
+  let task=clip(String(spec.task_text||""),900);
+  if(!task||!/добавить/i.test(task))task=`Добавить ${name}: SKYNET должен реализовать возможность "${clip(String(text||spec.purpose||name),180)}" через безопасный модуль: scope, commands, risk, tests, rollback; без auto-apply, без deploy, без direct GitHub write, без secrets, с confirm Сергея.`;
+  if(!task.toLowerCase().includes(name.toLowerCase()))task=task.replace(/^Добавить\s+/i,`Добавить ${name}: `);
+  if(!/^Добавить/i.test(task))task=`Добавить ${name}: ${task}`;
+  if(!/без|confirm|auto|deploy|secret/i.test(task))task+=" Без auto-apply, без deploy, без direct GitHub write, без secrets, с confirm Сергея.";
+  return clip(task,900);
 }
 function capabilityGapSpecFallbackV2(text){
   const s=clip(String(text||"новая возможность"),180);
@@ -609,6 +623,8 @@ function capabilityGapSpecPromptV2(snapshot,text,intent){
     '{"capability_name":"... v1","missing_reason":"...","purpose":"...","module_type":"tool|agent|memory|connector|voice|code_builder|test_runner|ui|other","files_or_functions":["..."],"safety_rules":["..."],"tests":["..."],"task_text":"Добавить ..."}',
     "Правила:",
     "- Не используй общие слова вроде 'улучшить интеграцию'. Назови конкретный модуль.",
+    "- capability_name должен быть конкретным названием модуля, 2-6 слов, с суффиксом v1. Примеры: Project Version Diff Explainer v1, Telegram File Intake Analyzer v1, Morning Project Watchdog v1.",
+    "- task_text должен начинаться с: Добавить <capability_name>: ...",
     "- task_text должен быть готовой задачей для /addtask.",
     "- Если запрос о том, чтобы SKYNET сам создавал модули/код — capability_name = Safe Builder + Patch Preview v1.",
     "- Если запрос о предпочтениях/правилах поведения — capability_name = User Preference Rules v1.",
@@ -643,8 +659,7 @@ async function capabilityGapDraftSpecV2(env,c,text,intent){
     tests:Array.isArray(parsed.tests)?parsed.tests.map(x=>clip(String(x),140)).slice(0,8):[],
     task_text:clip(String(parsed.task_text||""),900)
   };
-  if(!spec.task_text)spec.task_text=capabilityGapSpecFallbackV2(text).task_text;
-  if(!/без|confirm|auto|deploy|secret/i.test(spec.task_text))spec.task_text+=" Без auto-apply, без deploy, без direct GitHub write, без secrets, с confirm Сергея.";
+  spec.task_text=capabilityGapTaskEnsureNameV2(spec,text);
   return spec;
 }
 function capabilityGapIntentFromSpecV2(spec,text){
