@@ -366,13 +366,34 @@ export default {
     if (url.pathname === "/" || url.pathname === "/health")
       return json({ ok: true, version: VERSION, has: { telegram: !!c.telegram, model: !!c.openrouter, github: !!c.ghToken } });
 
+    if (url.pathname === "/diag") {
+      // Диагностика без утечки секретов: что настроено, а что нет.
+      let webhook = null;
+      try { webhook = await tg(c, "getWebhookInfo", {}); } catch {}
+      return json({
+        version: VERSION,
+        config: {
+          telegram_token: c.telegram ? "set" : "MISSING",
+          openrouter_key: c.openrouter ? "set" : "MISSING",
+          owner_id: c.owner ? "set" : "MISSING (бот открыт всем!)",
+          github: c.ghToken && c.repo ? "set" : "not set (патчи работать не будут)"
+        },
+        listens_on: ["/tg", "/telegram"],
+        telegram_webhook: webhook?.result ? {
+          url: webhook.result.url || "НЕ НАСТРОЕН",
+          pending: webhook.result.pending_update_count,
+          last_error: webhook.result.last_error_message || "нет"
+        } : "не удалось получить"
+      });
+    }
+
     if (url.pathname === "/setup" && url.searchParams.get("secret") &&
         url.searchParams.get("secret") === (await env.MINISKYNET_KV.get("config:SETUP_SECRET"))) {
-      const r = await tg(c, "setWebhook", { url: `${url.protocol}//${url.host}/tg`, allowed_updates: ["message"] });
+      const r = await tg(c, "setWebhook", { url: `${url.protocol}//${url.host}/telegram`, allowed_updates: ["message"] });
       return json({ ok: true, telegram: r });
     }
 
-    if (url.pathname === "/tg" && request.method === "POST") {
+    if ((url.pathname === "/tg" || url.pathname === "/telegram") && request.method === "POST") {
       const upd = await request.json().catch(() => null);
       const msg = upd?.message;
       if (!msg?.text) return json({ ok: true });
