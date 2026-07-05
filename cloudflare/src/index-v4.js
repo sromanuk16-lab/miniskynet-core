@@ -370,14 +370,32 @@ export default {
       // Диагностика без утечки секретов: что настроено, а что нет.
       let webhook = null;
       try { webhook = await tg(c, "getWebhookInfo", {}); } catch {}
+      // Реальная проверка доступа к GitHub — покажет точную причину 404.
+      let ghCheck = "не проверялось";
+      if (c.ghToken && c.repo) {
+        try {
+          await ghFile(c, "cloudflare/src/index-v4.js");
+          ghCheck = "✅ файл читается, всё ок";
+        } catch (e) {
+          const msg = String(e.message || e);
+          if (msg.includes("404")) ghCheck = `❌ 404: не найдено. Проверь: GITHUB_REPO="${c.repo}" (должно быть owner/repo), GITHUB_BRANCH="${c.branch}", и что файл лежит по пути cloudflare/src/index-v4.js`;
+          else if (msg.includes("401") || msg.includes("403")) ghCheck = `❌ ${msg.slice(0,60)}: токен неверный или без прав на этот репозиторий`;
+          else ghCheck = "❌ " + msg.slice(0, 120);
+        }
+      } else {
+        ghCheck = `❌ не хватает: ${!c.ghToken ? "GITHUB_TOKEN " : ""}${!c.repo ? "GITHUB_REPO" : ""}`;
+      }
       return json({
         version: VERSION,
         config: {
           telegram_token: c.telegram ? "set" : "MISSING",
           openrouter_key: c.openrouter ? "set" : "MISSING",
           owner_id: c.owner ? "set" : "MISSING (бот открыт всем!)",
-          github: c.ghToken && c.repo ? "set" : "not set (патчи работать не будут)"
+          github_repo: c.repo || "MISSING",
+          github_branch: c.branch,
+          github_token: c.ghToken ? "set" : "MISSING"
         },
+        github_file_access: ghCheck,
         listens_on: ["/tg", "/telegram"],
         telegram_webhook: webhook?.result ? {
           url: webhook.result.url || "НЕ НАСТРОЕН",
