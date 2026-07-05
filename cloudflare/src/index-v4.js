@@ -12,7 +12,7 @@
 //
 // Совместимо с существующим KV: config:*, self, goals, plan, tasks, memories, proposals.
 
-const VERSION = "clean-core-v3-voice-repo-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
+const VERSION = "clean-core-v4-action-fix-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
 
 // Клетка: что агент не может делать НИКОГДА (перенесено из вашего FORBIDDEN).
 const FORBIDDEN_PATHS = [".github/", "wrangler.toml", ".env"];
@@ -289,17 +289,22 @@ async function handleText(env, c, chatId, text) {
   // нужно действие — называет его. Ничего не выполняется молча: действие с
   // последствиями (патч) только предлагается, а подтверждаешь его ты.
   const sys = `${self.identity}
-Ты управляешься обычной речью, без команд. Отвечай тепло и живо, как понимающий ассистент, не как программа.
+Ты управляешься обычной речью. Отвечай коротко, живо, по делу.
+КРИТИЧЕСКИ ВАЖНО: ты НЕ работаешь в фоне и НЕ можешь "сделать позже". У тебя нет фоновых процессов.
+Поэтому НИКОГДА не пиши "начинаю работу", "сообщу когда готово", "дай мне время", "займусь этим" — это ложь, ты так не умеешь.
+Любое изменение кода происходит ПРЯМО СЕЙЧАС через intent, либо не происходит вообще.
 Верни строго JSON:
-{"reply":"твой ответ человеку по-русски","intent":"chat|status|add_task|list_tasks|remember|propose_patch|apply_patch|reject_patch","arg":"деталь намерения или пустая строка"}
-- intent=propose_patch: пользователь просит тебя изменить/улучшить свой код. arg = что именно.
-- intent=apply_patch: пользователь одобряет ожидающее предложение (говорит "да", "применяй", "давай"). arg = id если назван.
-- intent=add_task: просит запомнить дело. arg = текст задачи.
-- intent=remember: просит запомнить факт/предпочтение. arg = что запомнить.
-- intent=status/list_tasks: спрашивает как дела / что в планах.
-- intent=inspect_code: спрашивает, есть ли у тебя такая-то функция/команда/умение В КОДЕ, или "покажи свой код про X". arg = что искать.
-- intent=chat: обычный разговор, вопрос, рассуждение.
-Не выдумывай, что у тебя есть доступы, которых нет. Если не знаешь — скажи честно.`;
+{"reply":"короткий ответ человеку","intent":"chat|status|add_task|list_tasks|remember|propose_patch|apply_patch|reject_patch","arg":"деталь или пустая строка"}
+Как выбирать intent:
+- propose_patch: пользователь просит изменить/улучшить/добавить что-то В КОДЕ, ИЛИ говорит "делай", "сделай", "давай делай", "патч", "делай патч", "реализуй". arg = что именно менять (возьми из текущего или предыдущего сообщения). В reply напиши "Готовлю патч." — БЕЗ обещаний.
+- apply_patch: пользователь одобряет ГОТОВОЕ предложение ("применяй", "да", "подтверждаю", "оформляй PR"). arg = id если назван.
+- add_task: просит запомнить дело на потом. arg = текст.
+- remember: просит запомнить факт о себе. arg = что.
+- status / list_tasks: спрашивает как дела / что в задачах.
+- inspect_code: спрашивает есть ли у тебя функция/команда в коде. arg = что искать.
+- chat: обычный разговор.
+Если сомневаешься между chat и propose_patch на словах "делай/сделай/патч" — выбирай propose_patch.
+Не выдумывай доступы, которых нет. Не знаешь — скажи честно, коротко.`;
 
   const ctx = `Недавний диалог: ${JSON.stringify(dlg.slice(-6))}
 Задачи (${tasks.length}): ${tasks.slice(-5).map(t=>t.title).join("; ")}
@@ -311,8 +316,27 @@ async function handleText(env, c, chatId, text) {
   if (res.error) return send(c, chatId, "⚠️ " + res.error);
   const out = parseJson(res.text) || { reply: res.text, intent: "chat", arg: "" };
 
-  // Сначала всегда отдаём человеческий ответ.
-  if (out.reply) { await pushDialogue(env, "assistant", out.reply); await send(c, chatId, out.reply); }
+  // СТРАХОВКА: командные слова действия принудительно ведут в патч, что бы ни выбрала модель.
+  // Защита от "болтовни вместо дела" — если модель написала обещание, но не запустила действие.
+  const low = (text || "").toLowerCase().trim();
+  const APPROVE = ["применяй","применить","оформляй","подтверждаю","одобряю","оформи pr","оформи пр"];
+  const DO = ["делай","сделай","реализуй","патч","запатчи","внедряй","добавь команд","добавь функци","改"];
+  const isApprove = /^(да|ага|ок|окей)\b/i.test(low) || APPROVE.some(w => low.includes(w));
+  const isDo = DO.some(w => low.includes(w));
+  if (isApprove && props.length) { out.intent = "apply_patch"; out.arg = out.arg || ""; }
+  else if (isDo) {
+    out.intent = "propose_patch";
+    // если аргумент пустой — берём последнюю задачу или предыдущее сообщение как цель
+    if (!out.arg) {
+      const lastTask = (tasks.filter(t=>t.status!=="done").slice(-1)[0]);
+      out.arg = lastTask ? lastTask.title : (dlg.slice(-2)[0]?.text || text);
+    }
+  }
+
+  // Отдаём человеческий ответ (но если это действие-патч — короткий, без обещаний).
+  const replyText = (out.intent === "propose_patch") ? "🛠 Готовлю патч, без обещаний — прямо сейчас."
+                  : out.reply;
+  if (replyText) { await pushDialogue(env, "assistant", replyText); await send(c, chatId, replyText); }
 
   // Затем — действие, если оно есть.
   try {
