@@ -168,17 +168,23 @@ async function ghFile(c, path) {
 
 // Проверка синтаксиса без node: баланс скобок + целостность строк/шаблонов.
 function syntaxLooksSafe(code) {
-  let depth = { "{": 0, "(": 0, "[": 0 }, str = null;
-  const open = { "}": "{", ")": "(", "]": "[" };
-  for (let i = 0; i < code.length; i++) {
-    const ch = code[i], prev = code[i - 1];
-    if (str) { if (ch === str && prev !== "\\") str = null; continue; }
-    if (ch === '"' || ch === "'" || ch === "`") { str = ch; continue; }
-    if (ch === "{" || ch === "(" || ch === "[") depth[ch]++;
-    else if (open[ch]) { depth[open[ch]]--; if (depth[open[ch]] < 0) return false; }
+  // Настоящая проверка синтаксиса: даём движку РАЗОБРАТЬ код.
+  // Если парсится — валиден; если нет — бросит SyntaxError. Это надёжно
+  // работает с регулярками, комментариями и шаблонными строками, в отличие
+  // от наивного подсчёта скобок (который ошибочно заваливал даже рабочий файл).
+  if (!/export\s+default/.test(code)) return false; // структурная гарантия воркера
+  try {
+    // Убираем ESM-строки (Function их не парсит), тело оборачиваем в async —
+    // чтобы верхнеуровневый await был валиден. Function ПАРСИТ, но НЕ исполняет.
+    const body = code
+      .replace(/^\s*import\b[^\n]*$/gm, "")
+      .replace(/export\s+default\s*/g, "const __d = ")
+      .replace(/^\s*export\s+/gm, "");
+    new Function("return (async () => {\n" + body + "\n})");
+    return true;
+  } catch (e) {
+    return false;
   }
-  return !str && depth["{"] === 0 && depth["("] === 0 && depth["["] === 0
-    && /export\s+default/.test(code);
 }
 
 // ============================================================ SELF-PATCH GATE
