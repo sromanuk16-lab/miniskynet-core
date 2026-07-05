@@ -12,7 +12,7 @@
 //
 // Совместимо с существующим KV: config:*, self, goals, plan, tasks, memories, proposals.
 
-const VERSION = "clean-core-v5-syntax-fixed-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
+const VERSION = "clean-core-v6-no-eval-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
 
 // Клетка: что агент не может делать НИКОГДА (перенесено из вашего FORBIDDEN).
 const FORBIDDEN_PATHS = [".github/", "wrangler.toml", ".env"];
@@ -241,16 +241,37 @@ function syntaxLooksSafe(code) { return syntaxError(code) === null; }
 // Проверка самого фрагмента replace через парсер (ловит тонкие ошибки:
 // битые скобки, незакрытые строки — то, что теряется в балансе большого файла).
 function fragmentError(frag) {
-  try { new Function(String(frag)); return null; }
-  catch (e) {
-    // фрагмент может быть валидным выражением, а не полным стейтментом —
-    // пробуем обернуть, чтобы не отбивать легитимные куски.
-    try { new Function("({" + String(frag) + "})"); return null; }
-    catch (e2) {
-      try { new Function("async function _(){" + String(frag) + "\n}"); return null; }
-      catch (e3) { return "фрагмент не парсится: " + String(e.message || e).slice(0, 80); }
-    }
+  // БЕЗ new Function/eval — они запрещены в Cloudflare Workers ("Code generation
+  // from strings disallowed"). Проверяем фрагмент тем же лексером: он не создаёт
+  // код из строк, а посимвольно читает — что в Workers разрешено.
+  const f = String(frag || "");
+  // 1) баланс внутри самого фрагмента (скобки, строки, шаблоны)
+  const balErr = syntaxError("export default 0;\n" + f);
+  if (balErr && !/нет export default/.test(balErr)) {
+    // syntaxError видит несбалансированность/незакрытые строки в самом фрагменте
+    if (/скобк|строк|шаблон|регэксп/i.test(balErr)) return balErr;
   }
+  // 2) прямая проверка баланса фрагмента изолированно
+  const direct = balanceOnly(f);
+  if (direct) return direct;
+  return null;
+}
+// Изолированный баланс: считает скобки/строки во фрагменте, ничего не исполняя.
+function balanceOnly(code) {
+  const stack = []; const pairs = { ")": "(", "]": "[", "}": "{" };
+  let i = 0; const n = code.length;
+  while (i < n) {
+    const ch = code[i];
+    if (ch === '"' || ch === "'") { const q = ch; i++; while (i < n && code[i] !== q) { if (code[i] === "\\") i++; i++; } if (i >= n) return "незакрытая строка"; i++; continue; }
+    if (ch === "`") { i++; while (i < n && code[i] !== "`") { if (code[i] === "\\") i++; i++; } if (i >= n) return "незакрытый шаблон"; i++; continue; }
+    if (ch === "/" && code[i+1] === "/") { while (i < n && code[i] !== "\n") i++; continue; }
+    if (ch === "/" && code[i+1] === "*") { i += 2; while (i < n && !(code[i] === "*" && code[i+1] === "/")) i++; i += 2; continue; }
+    if (ch === "(" || ch === "[" || ch === "{") stack.push(ch);
+    else if (ch === ")" || ch === "]" || ch === "}") { if (stack.pop() !== pairs[ch]) return "несбалансированная скобка " + ch; }
+    i++;
+  }
+  if (stack.length) return "незакрытых скобок: " + stack.length;
+  return null;
 }
 
 // ============================================================ SELF-PATCH GATE
