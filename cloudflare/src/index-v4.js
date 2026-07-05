@@ -53,6 +53,36 @@ const uid=p=>`${p}_${crypto.randomUUID().slice(0,8)}`;
 const clean=p=>String(p||"").trim().replace(/^\/+/,"");
 const safe=p=>{const x=clean(p);return x&&!x.includes("..")&&x.length<180&&/^[\w./-]+$/.test(x)?x:null};
 const out=(data,status=200)=>new Response(JSON.stringify(data,null,2),{status,headers:H});
+// === ГОЛОСОВОЕ УПРАВЛЕНИЕ (voice v1) ===
+// Скачивает голосовое из Telegram и распознаёт через OpenAI Whisper.
+// Возвращает распознанный текст или null. Не трогает существующие защиты —
+// результат идёт в тот же parse()/handle(), что и обычный текст.
+async function voiceToText(c,env,voice){
+  try{
+    const key=String(env.OPENAI_API_KEY||"").trim()||await kvText(env,"config:OPENAI_API_KEY");
+    if(!key)return{err:"голос не настроен: нет OPENAI_API_KEY (Whisper) в config"};
+    // 1) получить file_path у Telegram
+    const gf=await fetch(`https://api.telegram.org/bot${c.telegram}/getFile?file_id=${voice.file_id}`);
+    const gj=await gf.json().catch(()=>null);
+    const fp=gj?.result?.file_path;
+    if(!fp)return{err:"не удалось получить голосовой файл у Telegram"};
+    // 2) скачать сам файл (ogg/opus)
+    const audio=await fetch(`https://api.telegram.org/file/bot${c.telegram}/${fp}`);
+    if(!audio.ok)return{err:"не смог скачать голосовой файл"};
+    const blob=await audio.blob();
+    // 3) отправить в Whisper
+    const form=new FormData();
+    form.append("file",blob,"voice.ogg");
+    form.append("model","whisper-1");
+    form.append("language","ru");
+    const wr=await fetch("https://api.openai.com/v1/audio/transcriptions",{
+      method:"POST",headers:{authorization:"Bearer "+key},body:form});
+    if(!wr.ok)return{err:"Whisper "+wr.status+": "+clip(await wr.text().catch(()=>""),150)};
+    const wj=await wr.json().catch(()=>null);
+    const text=String(wj?.text||"").trim();
+    return text?{text}:{err:"пустое распознавание"};
+  }catch(e){return{err:"голос: "+clip(e.message||e,150)}}
+}
 function parse(update){const m=update?.message||update?.edited_message;if(!m)return null;const text=String(m.text||"").trim();let command=null,args="";if(text.startsWith("/")){const i=text.indexOf(" ");command=(i<0?text:text.slice(0,i)).replace(/@\w+$/,"").trim().toLowerCase();args=i<0?"":text.slice(i+1).trim()}return{chatId:m.chat?.id,userId:m.from?.id,text,command,args}}
 async function kvText(env,key){return String(await env.MINISKYNET_KV.get(key)||"").trim()}
 async function kvGet(env,key,fallback){const raw=await env.MINISKYNET_KV.get(key);if(!raw)return fallback;try{return JSON.parse(raw)}catch{return fallback}}
@@ -369,7 +399,24 @@ ${t?`Источник: tasks
   if(command==="/memory"){const mem=await arr(env,"memories");return send(c,chatId,mem.length?"🧠 Memory:\n"+mem.slice(-10).map(x=>`- [${x.type||"note"}/${x.score||0}] ${x.text}`).join("\n"):"Память пустая.")}
   if(command==="/memory_score"){const mem=await arr(env,"memories"),avg=mem.length?Math.round(mem.reduce((a,b)=>a+(b.score||0),0)/mem.length):0;return send(c,chatId,`🧠 Memory Quality:\n- всего: ${mem.length}\n- avg: ${avg}/100`)}
   if(command==="/cost_status")return send(c,chatId,await costStatus(env));
-  if(command==="/think"||!command)return send(c,chatId,await runThink(env,c,args||text));
+  if(command==="/think"||!command){
+     // Естественная речь про изменение своего кода → мягко ведём в ЗАЩИЩЁННЫЙ контур /propose.
+     // Ничего не обходим: реальную работу делает существующий /propose с его failureLock+syntaxSafe+enforceCapability.
+     const _t=(text||"").toLowerCase();
+     const _wantsPatch=/(улучши|доработай|допиши|измени|добавь).{0,40}(код|себя|модуль|функци|команд|возможност)|реализуй|напиши себе|подключись к|подключение к|сделай себе/.test(_t);
+     if(_wantsPatch && !command){
+       const _reply=await runThink(env,c,text);
+       await send(c,chatId,_reply);
+       await send(c,chatId,"🛠 Если хочешь, чтобы я реально это сделал в своём коде — скажи «предложи: <что именно>», и я проведу изменение через мою защиту (proposal → проверка синтаксиса → твоё подтверждение → PR). Сам в main ничего не пишу.");
+       return;
+     }
+     // "предложи: ..." — естественный вход в существующий /propose, через все его гейты.
+     if(!command && /^предложи[:\s]/i.test(text||"")){
+       const _what=text.replace(/^предложи[:\s]+/i,"").trim();
+       return handle(env,c,{chatId,command:"/propose",args:_what,text:_what});
+     }
+     return send(c,chatId,await runThink(env,c,args||text));
+   }
   if(command==="/repo_config")return send(c,chatId,`🔎 Repo config:\n- repo: ${c.repo}\n- branch: ${c.branch}\n- GitHub token: ${c.gh?"есть ✅":"нет ⛔"}\n- OpenRouter key: ${c.openrouter?"есть ✅":"нет ⛔"}`);
   if(command==="/repo_file"){const f=await readFile(c,args);return send(c,chatId,`📄 ${f.path}\n- size: ${f.size}\n- sha: ${f.sha.slice(0,12)}\n\n${clip(f.content,1400)}`)}
   if(command==="/repo_scan"){const rows=[];for(const p of["cloudflare/wrangler.toml","cloudflare/src/index-v4.js"]){try{const f=await readFile(c,p);rows.push(`✅ ${p} size=${f.size} sha=${f.sha.slice(0,10)}`)}catch(e){rows.push(`❌ ${p}: ${e.message}`)}}return send(c,chatId,"🧭 Repo scan:\n"+rows.join("\n"))}
@@ -396,5 +443,16 @@ ${t?`Источник: tasks
   if(command==="/proposals_clean_confirm")return send(c,chatId,await proposalsCleanConfirm(env,args));
   return send(c,chatId,`Не знаю команду ${command}. /help — список. Модель не вызываю.`)
 }
-async function telegram(request,env){const c=await cfg(env),msg=parse(await request.json().catch(()=>null));if(!msg)return out({ok:true});if(!ownerOk(c,msg.userId)){await send(c,msg.chatId,"⛔ Доступ закрыт.");return out({ok:true,denied:true})}try{if(msg.command&&!CMDS.has(msg.command)){await send(c,msg.chatId,`Не знаю команду ${msg.command}. /help — список. Модель не вызываю.`);return out({ok:true,unknown_command:true,version:VERSION})}await handle(env,c,msg);return out({ok:true,command:msg.command||"text",version:VERSION})}catch(e){await send(c,msg.chatId,`❌ Core error: ${clip(e.message||e,1000)}`);return out({ok:false,error:String(e.message||e),version:VERSION},500)}}
+async function telegram(request,env){const c=await cfg(env);const _upd=await request.json().catch(()=>null);
+  const _m=_upd?.message||_upd?.edited_message;
+  // БЕЗОПАСНОСТЬ: owner-check ДО распознавания голоса — чужой не тратит Whisper-бюджет.
+  if(_m && !ownerOk(c,_m.from?.id)){await send(c,_m.chat?.id,"⛔ Доступ закрыт.");return out({ok:true,denied:true});}
+  // ГОЛОС: голосовое/аудио от владельца → распознаём и превращаем в обычный текст.
+  if(_m&&(_m.voice||_m.audio)){
+    const _vt=await voiceToText(c,_upd,_m.voice||_m.audio);
+    if(_vt.err){await send(c,_m.chat?.id,"🎤 "+_vt.err);return out({ok:true,voice_error:_vt.err})}
+    _m.text=_vt.text;
+    await send(c,_m.chat?.id,"🎤 Услышал: «"+_vt.text+"»");
+  }
+  const msg=parse(_upd);if(!msg)return out({ok:true});if(!ownerOk(c,msg.userId)){await send(c,msg.chatId,"⛔ Доступ закрыт.");return out({ok:true,denied:true})}try{if(msg.command&&!CMDS.has(msg.command)){await send(c,msg.chatId,`Не знаю команду ${msg.command}. /help — список. Модель не вызываю.`);return out({ok:true,unknown_command:true,version:VERSION})}await handle(env,c,msg);return out({ok:true,command:msg.command||"text",version:VERSION})}catch(e){await send(c,msg.chatId,`❌ Core error: ${clip(e.message||e,1000)}`);return out({ok:false,error:String(e.message||e),version:VERSION},500)}}
 export default{async fetch(request,env){const url=new URL(request.url);if(url.pathname==="/"||url.pathname==="/health")return out(health());if(url.pathname==="/telegram"&&request.method==="POST")return telegram(request,env);return out({ok:false,error:"not found",version:VERSION},404)},async scheduled(event,env,ctx){try{await scheduledAliveV1(event,env)}catch(e){console.log("scheduledAliveV1 error",String(e?.message||e))}}};
