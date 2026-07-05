@@ -114,6 +114,12 @@ function parseJson(text) {
 }
 
 // ============================================================ MEMORY / STATE
+async function versionInfo() {
+  return {
+    version: VERSION,
+    processedMessages: (await getList(env, 'dialogue')).length
+  };
+}
 async function getSelf(env) {
   return await kvGet(env, "self", {
     identity: "Я MiniSkynet — личный инженерный агент Сергея. Говорю по-русски, живо и по делу, без канцелярита. Не притворяюсь человеком, но и не звучу как робот-автоответчик.",
