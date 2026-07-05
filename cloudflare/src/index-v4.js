@@ -12,7 +12,7 @@
 //
 // Совместимо с существующим KV: config:*, self, goals, plan, tasks, memories, proposals.
 
-const VERSION = "clean-core-v4-action-fix-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
+const VERSION = "clean-core-v5-syntax-fixed-2026-07-05"; // гибрид: начинка v5.6.15 + управление речью
 
 // Клетка: что агент не может делать НИКОГДА (перенесено из вашего FORBIDDEN).
 const FORBIDDEN_PATHS = [".github/", "wrangler.toml", ".env"];
@@ -167,23 +167,89 @@ async function ghFile(c, path) {
 }
 
 // Проверка синтаксиса без node: баланс скобок + целостность строк/шаблонов.
-function syntaxLooksSafe(code) {
-  // Настоящая проверка синтаксиса: даём движку РАЗОБРАТЬ код.
-  // Если парсится — валиден; если нет — бросит SyntaxError. Это надёжно
-  // работает с регулярками, комментариями и шаблонными строками, в отличие
-  // от наивного подсчёта скобок (который ошибочно заваливал даже рабочий файл).
-  if (!/export\s+default/.test(code)) return false; // структурная гарантия воркера
-  try {
-    // Убираем ESM-строки (Function их не парсит), тело оборачиваем в async —
-    // чтобы верхнеуровневый await был валиден. Function ПАРСИТ, но НЕ исполняет.
-    const body = code
-      .replace(/^\s*import\b[^\n]*$/gm, "")
-      .replace(/export\s+default\s*/g, "const __d = ")
-      .replace(/^\s*export\s+/gm, "");
-    new Function("return (async () => {\n" + body + "\n})");
-    return true;
-  } catch (e) {
-    return false;
+// Надёжная проверка синтаксиса: лексер, корректно пропускающий строки,
+// шаблонные литералы, комментарии и регэкспы, затем баланс скобок.
+// Не использует new Function и текстовых замен — они сами ломали валидный код.
+function syntaxError(code) {
+  if (!/export\s+default/.test(code)) return "нет export default";
+  const stack = [];
+  const pairs = { ")": "(", "]": "[", "}": "{" };
+  let i = 0, n = code.length;
+  // для различения regex от деления смотрим предыдущий значимый символ
+  let prevSig = "";
+  while (i < n) {
+    const ch = code[i];
+    // строки
+    if (ch === '"' || ch === "'") {
+      const q = ch; i++;
+      while (i < n && code[i] !== q) { if (code[i] === "\\") i++; i++; }
+      if (i >= n) return "незакрытая строка " + q;
+      i++; prevSig = "x"; continue;
+    }
+    // шаблонные литералы (с вложенными ${...})
+    if (ch === "`") {
+      i++;
+      while (i < n && code[i] !== "`") {
+        if (code[i] === "\\") { i += 2; continue; }
+        if (code[i] === "$" && code[i + 1] === "{") {
+          i += 2; let d = 1;
+          while (i < n && d > 0) {
+            if (code[i] === "{") d++;
+            else if (code[i] === "}") d--;
+            else if (code[i] === "`") { // вложенный шаблон — простой пропуск
+              i++; while (i < n && code[i] !== "`") { if (code[i]==="\\") i++; i++; }
+            }
+            i++;
+          }
+          continue;
+        }
+        i++;
+      }
+      if (i >= n) return "незакрытый шаблонный литерал";
+      i++; prevSig = "x"; continue;
+    }
+    // комментарии
+    if (ch === "/" && code[i + 1] === "/") { while (i < n && code[i] !== "\n") i++; continue; }
+    if (ch === "/" && code[i + 1] === "*") { i += 2; while (i < n && !(code[i] === "*" && code[i+1] === "/")) i++; i += 2; continue; }
+    // регэксп (если / стоит там, где ожидается значение, а не деление)
+    if (ch === "/" && !/[a-zA-Z0-9_$)\]]/.test(prevSig)) {
+      i++; let inClass = false;
+      while (i < n) {
+        if (code[i] === "\\") { i += 2; continue; }
+        if (code[i] === "[") inClass = true;
+        else if (code[i] === "]") inClass = false;
+        else if (code[i] === "/" && !inClass) break;
+        else if (code[i] === "\n") return "незакрытый регэксп";
+        i++;
+      }
+      i++; while (i < n && /[a-z]/i.test(code[i])) i++; // флаги
+      prevSig = "x"; continue;
+    }
+    // скобки
+    if (ch === "(" || ch === "[" || ch === "{") { stack.push(ch); prevSig = ch; i++; continue; }
+    if (ch === ")" || ch === "]" || ch === "}") {
+      if (stack.pop() !== pairs[ch]) return "несбалансированная скобка " + ch + " на позиции " + i;
+      prevSig = ch; i++; continue;
+    }
+    if (!/\s/.test(ch)) prevSig = ch;
+    i++;
+  }
+  if (stack.length) return "незакрытых скобок: " + stack.length + " (" + stack.join("") + ")";
+  return null;
+}
+function syntaxLooksSafe(code) { return syntaxError(code) === null; }
+// Проверка самого фрагмента replace через парсер (ловит тонкие ошибки:
+// битые скобки, незакрытые строки — то, что теряется в балансе большого файла).
+function fragmentError(frag) {
+  try { new Function(String(frag)); return null; }
+  catch (e) {
+    // фрагмент может быть валидным выражением, а не полным стейтментом —
+    // пробуем обернуть, чтобы не отбивать легитимные куски.
+    try { new Function("({" + String(frag) + "})"); return null; }
+    catch (e2) {
+      try { new Function("async function _(){" + String(frag) + "\n}"); return null; }
+      catch (e3) { return "фрагмент не парсится: " + String(e.message || e).slice(0, 80); }
+    }
   }
 }
 
@@ -204,7 +270,21 @@ async function proposePatch(env, c, request) {
   if (file.content.split(p.find).length > 2) throw new Error("фрагмент find неуникален — уточни задачу");
 
   const newContent = file.content.replace(p.find, p.replace);
-  if (!syntaxLooksSafe(newContent)) throw new Error("патч ломает синтаксис — отклонён до записи");
+  const synErr = syntaxError(newContent) || fragmentError(p.replace);
+  if (synErr) {
+    // ДИАГНОСТИКА: показываем, ЧТО модель пыталась вставить и ПОЧЕМУ отклонено.
+    const dbg = [
+      "❌ Патч отклонён. Диагностика:",
+      "ПРИЧИНА: " + synErr,
+      "",
+      "find (что заменяем):",
+      String(p.find).slice(0, 300),
+      "",
+      "replace (на что):",
+      String(p.replace).slice(0, 400)
+    ].join("\n");
+    throw new Error(dbg);
+  }
 
   const prop = {
     id: "p" + Math.random().toString(36).slice(2, 8),
@@ -236,7 +316,8 @@ async function applyPatch(env, c, id) {
   if (!cur.content.includes(p.find)) throw new Error("фрагмент исчез — заново");
 
   const newContent = cur.content.replace(p.find, p.replace);
-  if (!syntaxLooksSafe(newContent)) throw new Error("синтаксис сломан — отклонено");
+  const synErr2 = syntaxError(newContent) || fragmentError(p.replace);
+  if (synErr2) throw new Error("синтаксис сломан — отклонено: " + synErr2);
 
   const branch = `skynet/${p.id}`;
   const baseRef = await gh(c, "GET", `/repos/${c.repo}/git/ref/heads/${c.branch}`);
