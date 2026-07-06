@@ -1,4 +1,4 @@
-const VERSION = "v7.2.1-attention-situation-model-2026-07-07";
+const VERSION = "v7.3.0-inner-director-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
@@ -9,7 +9,6 @@ const WORKING_TURN_LIMIT = 16;
 const PROMPT_MEMORY_LIMIT = 8;
 const PROMPT_EXPERIENCE_LIMIT = 6;
 const PROMPT_TURN_LIMIT = 6;
-const FAST_MIND_MAX_INPUT = 280;
 const PENDING_TTL_MS = 45 * 60 * 1000;
 const H = { "content-type": "application/json; charset=utf-8" };
 
@@ -284,6 +283,19 @@ function defaultState() {
         stakes: "нужно сохранять цельность мышления, не уходить в шаблоны и не терять нить",
         recommended_move: "понять ситуацию, ответить коротко и назвать следующий слой"
       },
+      director: {
+        intent: "build_digital_brain",
+        decision: "answer_with_next_step",
+        priority: "keep_architecture_direction",
+        should_answer: true,
+        should_act: false,
+        should_remember: true,
+        should_ask: false,
+        should_block: false,
+        response_style: "short_agent_position",
+        next_step: "v7.3 Inner Director: выбирать ответить, запомнить, спросить, предложить или действовать",
+        reason: "Сергей строит цифровой мозг, а не набор команд."
+      },
       last_user: "",
       last_agent: "",
       last_agent_meaning: "",
@@ -327,6 +339,7 @@ function normalizeState(s) {
   out.working = { ...d.working, ...(isObj(out.working) ? out.working : {}) };
   if (!isObj(out.working.attention)) out.working.attention = d.working.attention;
   if (!isObj(out.working.situation_model)) out.working.situation_model = d.working.situation_model;
+  if (!isObj(out.working.director)) out.working.director = d.working.director;
   if (!Array.isArray(out.working.recent_turns)) out.working.recent_turns = [];
   if (!isObj(out.working.open_loop)) out.working.open_loop = null;
   if (!Array.isArray(out.tasks)) out.tasks = [];
@@ -371,6 +384,7 @@ function stateForPrompt(state, userText = "") {
     identity: state.identity,
     attention: buildAttentionModel(state, userText),
     situation_model: buildSituationModel(state, userText),
+    director: buildInnerDirector(state, userText),
     memory: {
       about_user: pickMemory(state.memory.about_user, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
       project: pickMemory(state.memory.project, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
@@ -412,6 +426,7 @@ function workingForPrompt(state) {
     open_loop: w.open_loop || null,
     attention: isObj(w.attention) ? w.attention : null,
     situation_model: isObj(w.situation_model) ? w.situation_model : null,
+    director: isObj(w.director) ? w.director : null,
     recent_turns: Array.isArray(w.recent_turns) ? w.recent_turns.slice(-PROMPT_TURN_LIMIT) : [],
     updated_at: w.updated_at || ""
   };
@@ -608,6 +623,155 @@ function inferRecommendedMove(attention) {
   return "ответить коротко, с позицией и без технодампа";
 }
 
+function buildInnerDirector(state, userText = "") {
+  const text = clean(userText);
+  const a = buildAttentionModel(state, text);
+  const sm = buildSituationModel(state, text);
+  const hasPendingAction = !!state?.pending;
+  const acceptance = isClearAcceptance(text);
+  const refusal = isClearRefusal(text);
+  let intent = a.primary_signal || "conversation";
+  let decision = "answer";
+  let priority = "respond_to_current_message";
+  let shouldAnswer = true;
+  let shouldAct = false;
+  let shouldRemember = false;
+  let shouldAsk = false;
+  let shouldBlock = false;
+  let responseStyle = a.response_mode || "short_human";
+  let nextStep = sm.recommended_cognitive_move || "ответить коротко и по делу";
+  let reason = "Текущая фраза Сергея имеет приоритет; использовать память только как контекст.";
+
+  if (hasPendingAction && acceptance) {
+    intent = "confirm_pending_action";
+    decision = "execute_pending_if_safe";
+    priority = "finish_open_loop";
+    shouldAct = true;
+    responseStyle = "done_short";
+    nextStep = "выполнить последнее ожидающее действие, если оно разрешено";
+    reason = "Сергей подтвердил последнее предложенное действие.";
+  } else if (hasPendingAction && refusal) {
+    intent = "cancel_pending_action";
+    decision = "clear_pending";
+    priority = "respect_refusal";
+    shouldAct = true;
+    responseStyle = "ack_short";
+    nextStep = "очистить ожидание и не выполнять старое действие";
+    reason = "Сергей отказался от последнего предложения.";
+  } else if (a.standalone_identity_question) {
+    intent = "self_identity";
+    decision = "answer_identity";
+    priority = "self_model";
+    responseStyle = "identity_short";
+    nextStep = "ответить кто я и куда развиваюсь";
+    reason = "Это самостоятельный вопрос о личности агента, не продолжение прошлой темы.";
+  } else if (a.standalone_memory_question) {
+    intent = "memory_check";
+    decision = "summarize_relevant_memory";
+    priority = "show_memory_truth";
+    responseStyle = "memory_brief";
+    nextStep = "показать цель, стиль, уроки и текущий этап";
+    reason = "Сергей проверяет, есть ли настоящая память.";
+  } else if (a.standalone_goal_question) {
+    intent = "goal_check";
+    decision = "answer_goal";
+    priority = "self_goal";
+    responseStyle = "goal_short";
+    nextStep = "назвать главную цель и ближайший слой";
+    reason = "Сергей спрашивает про цель агента.";
+  } else if (a.is_runtime_status_question) {
+    intent = "runtime_quality";
+    decision = "explain_cause_then_next_step";
+    priority = "keep_quality";
+    responseStyle = "brief_cause_and_fix_direction";
+    shouldRemember = true;
+    nextStep = "объяснить причину задержки без возврата к тупым fast-перехватам";
+    reason = "Сергей заметил задержку/зависание; нужно объяснить и не ломать понимание ради скорости.";
+  } else if (a.is_quality_criticism) {
+    intent = "quality_criticism";
+    decision = "admit_and_correct_mechanism";
+    priority = "learn_from_error";
+    responseStyle = "honest_diagnosis_then_next_step";
+    shouldRemember = true;
+    nextStep = "назвать причину и изменить общий механизм, не фразу";
+    reason = "Сергей указывает на ошибку; важно не защищаться и не лепить частный фикс.";
+  } else if (a.is_development_conversation) {
+    intent = "self_development";
+    decision = "plan_next_brain_layer";
+    priority = "advance_main_goal";
+    responseStyle = "agent_position_with_next_layer";
+    shouldRemember = true;
+    nextStep = "вести план развития цифрового мозга: директор, самокритика, опыт, инструменты";
+    reason = "Разговор о развитии SKYNET — это часть главной цели, а не заблокированное действие.";
+  } else if (a.continuity === "followup_to_last_agent" || a.continuity === "possible_followup") {
+    intent = "dialogue_continuity";
+    decision = "continue_last_thought";
+    priority = "keep_thread";
+    responseStyle = "continue_last_thought";
+    nextStep = "ответить по последней реплике агента и open_loop";
+    reason = "Фраза похожа на короткое уточнение; нужно держать нить разговора.";
+  } else if (a.is_action_request) {
+    intent = "action_request";
+    decision = "check_tool_then_execute_or_offer";
+    priority = "use_tools_without_pretending";
+    shouldAct = true;
+    responseStyle = "action_short";
+    nextStep = "выполнить доступное действие или коротко предложить добавить недостающую возможность";
+    reason = "Сергей просит действие; директор должен выбрать действие, запрос уточнения или честное 'пока не умею'.";
+  } else if (text.length < 2) {
+    intent = "empty_or_noise";
+    decision = "ask_minimal_clarification";
+    priority = "avoid_guessing";
+    shouldAsk = true;
+    responseStyle = "clarify_short";
+    nextStep = "попросить одну короткую конкретику";
+    reason = "Слишком мало содержания для уверенного решения.";
+  }
+
+  if (DANGEROUS_WORDS.some((w) => lower(text).includes(w)) && !a.is_development_conversation) {
+    shouldBlock = true;
+    priority = "protect_high_risk_actions";
+    decision = "block_or_require_explicit_command";
+    nextStep = "не выполнять опасное действие обычным текстом";
+    reason = "Текст может относиться к высокорисковому действию.";
+  }
+
+  return normalizeDirector({
+    intent,
+    decision,
+    priority,
+    should_answer: shouldAnswer,
+    should_act: shouldAct,
+    should_remember: shouldRemember,
+    should_ask: shouldAsk,
+    should_block: shouldBlock,
+    response_style: responseStyle,
+    next_step: nextStep,
+    reason,
+    attention_signal: a.primary_signal,
+    situation_scene: sm.scene
+  });
+}
+
+function normalizeDirector(d) {
+  const x = isObj(d) ? d : {};
+  return {
+    intent: clean(x.intent || "conversation"),
+    decision: clean(x.decision || "answer"),
+    priority: clean(x.priority || "respond_to_current_message"),
+    should_answer: x.should_answer !== false,
+    should_act: Boolean(x.should_act),
+    should_remember: Boolean(x.should_remember),
+    should_ask: Boolean(x.should_ask),
+    should_block: Boolean(x.should_block),
+    response_style: clean(x.response_style || "short_human"),
+    next_step: clean(x.next_step || "ответить коротко и по делу"),
+    reason: clean(x.reason || ""),
+    attention_signal: clean(x.attention_signal || ""),
+    situation_scene: clean(x.situation_scene || "")
+  };
+}
+
 function buildMessages(state, userText, msg) {
   const payload = {
     now: now(),
@@ -615,6 +779,7 @@ function buildMessages(state, userText, msg) {
     user_message: userText,
     attention: buildAttentionModel(state, userText),
     situation_model: buildSituationModel(state, userText),
+    director: buildInnerDirector(state, userText),
     semantic_hint: buildSemanticHint(state, userText),
     state: stateForPrompt(state, userText),
     tools: TOOL_REGISTRY,
@@ -633,6 +798,19 @@ function buildMessages(state, userText, msg) {
     required_json_schema: {
       speech: "short Russian answer to Sergey",
       ops: [{ op: "operation name", other_fields: "operation payload" }],
+      director: {
+        intent: "what Sergey really wants now",
+        decision: "answer|remember|ask|act|offer|block|continue",
+        priority: "what matters most",
+        should_answer: true,
+        should_act: false,
+        should_remember: false,
+        should_ask: false,
+        should_block: false,
+        response_style: "short human style",
+        next_step: "one next useful move",
+        reason: "why this decision"
+      },
       working: {
         topic: "current topic",
         focus: "what matters right now",
@@ -653,12 +831,16 @@ function buildMessages(state, userText, msg) {
   };
 
   const system = [
-    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.2.1: Attention + Situation Model.",
+    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.3: Inner Director.",
     "Это не командный бот и не быстрый локальный перехватчик. Каждый обычный текст решай как один цельный агент: понять смысл, вспомнить нужное, выбрать действие, ответить коротко.",
-    "Перед тобой есть attention и situation_model. Это не готовый ответ и не шаблон; это карта внимания: что сейчас важно, что Сергей проверяет, к чему привязан диалог.",
+    "Перед тобой есть attention, situation_model и director. Attention показывает главный сигнал, situation_model описывает сцену, director выбирает режим поведения: ответить, запомнить, спросить, предложить, действовать или остановить действие.",
+    "Director — не шаблон ответа. Это внутренний управляющий слой. Следуй его intent/decision/priority, но формулируй живой короткий ответ сама.",
     "Тебе уже дали компактный контекст. Не пытайся восстановить всю историю; используй только релевантное из attention, situation_model, state, working, recent_turns, pending и recent_experience.",
-    "Приоритеты понимания: 1) текущая фраза Сергея, 2) attention.primary_signal, 3) situation_model, 4) последняя реплика агента и open_loop, 5) рабочая память, 6) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
-    "Если attention.primary_signal указывает identity/memory/goal/runtime_status/criticism/development — отвечай по этому сигналу, а не по инерции прошлого ответа.",
+    "Приоритеты понимания: 1) текущая фраза Сергея, 2) director.intent/decision/priority, 3) attention.primary_signal, 4) situation_model, 5) последняя реплика агента и open_loop, 6) рабочая память, 7) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
+    "Если director.decision указывает answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
+    "Если director.should_remember=true, добавь короткий experience.write или memory.write только если есть реальный урок. Не логируй всё подряд.",
+    "Если director.should_ask=true, задай один короткий вопрос. Если информации хватает — не спрашивай.",
+    "Если director.should_block=true, остановись коротко. Но разговор о развитии/Джарвисе не блокируй.",
     "Самостоятельные вопросы вроде 'ты кто?', 'кто ты?', 'какая у тебя цель?', 'что ты помнишь?', 'что в памяти?' отвечай напрямую из identity и памяти, а не как продолжение предыдущего ответа.",
     "Короткие уточнения ('какой?', 'почему?', 'что дальше?', 'что именно?') считай продолжением только если они реально не имеют самостоятельного смысла. Тогда отвечай по последней фразе агента и open_loop. Не спрашивай 'какой вопрос ты имеешь в виду'.",
     "Разговор о том, чтобы стать умнее, развиваться, стать уровнем Джарвиса или получить саморазвитие — это обсуждение цели и плана развития, не опасное действие. Не блокируй его фразой 'нужен отдельный режим'.",
@@ -735,6 +917,7 @@ function normalizeDecision(d) {
   return {
     speech: clean(x.speech || x.answer || ""),
     ops,
+    director: isObj(x.director) ? normalizeDirector(x.director) : {},
     working: isObj(x.working) ? x.working : {},
     experience_notes: Array.isArray(x.experience_notes) ? x.experience_notes.map(clean).filter(Boolean).slice(0, 5) : [],
     confidence: Number(x.confidence || 0),
@@ -742,7 +925,7 @@ function normalizeDecision(d) {
   };
 }
 
-// v7.2: no local Fast Mind for ordinary text. All normal messages go through askBrain().
+// v7.3: no local Fast Mind for ordinary text. One Brain decides, guided by Attention, Situation Model and Inner Director.
 
 function isClearAcceptance(s) {
   const t = lower(s).replace(/[.!?]+$/g, "").trim();
@@ -786,14 +969,14 @@ function isDevelopmentContext(state, text = "") {
   return DEVELOPMENT_CONVERSATION_HINTS.some((h) => context.includes(h)) || context.includes("стала умнее") || context.includes("сделать тебя умнее") || context.includes("доросла");
 }
 
-// v7.2 keeps only context hints; no local speech templates for ordinary dialogue.
+// v7.3 keeps one LLM brain; Director is a control signal, not a local speech template.
 
 async function runAgent(env, c, msg) {
   const state = await loadState(env);
   const decision = await askBrain(c, state, msg);
   const result = await applyDecision(state, decision, msg);
   updateWorking(state, decision, msg, result.speech);
-  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: "one_brain_attention_situation", attention: buildAttentionModel(state, msg.text).primary_signal }));
+  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: "one_brain_inner_director", attention: buildAttentionModel(state, msg.text).primary_signal }));
   await saveState(env, state);
   return result.speech;
 }
@@ -1052,6 +1235,9 @@ function updateWorking(state, decision, msg, speech) {
   };
   const recent = Array.isArray(prev.recent_turns) ? prev.recent_turns.slice(-WORKING_TURN_LIMIT + 1) : [];
   recent.push(turn);
+  const attention = buildAttentionModel(state, msg.text);
+  const situation_model = buildSituationModel(state, msg.text);
+  const calculatedDirector = buildInnerDirector(state, msg.text);
   state.working = {
     topic: clean(w.topic || prev.topic || "диалог"),
     focus: clean(w.focus || prev.focus || "ответить Сергею"),
@@ -1059,13 +1245,14 @@ function updateWorking(state, decision, msg, speech) {
     user_mood: clean(w.user_mood || prev.user_mood || "обычный"),
     current_goal: clean(w.current_goal || prev.current_goal || state.identity.main_goal || "помочь Сергею"),
     current_obstacle: clean(w.current_obstacle || prev.current_obstacle || "нет"),
-    next_step: clean(w.next_step || prev.next_step || "ответить по делу"),
+    next_step: clean(w.next_step || calculatedDirector.next_step || prev.next_step || "ответить по делу"),
     last_agent_meaning: clean(w.last_agent_meaning || summarizeAgentMeaning(speech) || prev.last_agent_meaning || ""),
     expecting: clean(w.expecting || inferExpectationFromSpeech(speech) || ""),
     mood: clean(w.mood || prev.mood || "обычный"),
     open_loop: isObj(w.open_loop) ? w.open_loop : inferOpenLoop(prev, msg, speech),
-    attention: buildAttentionModel(state, msg.text),
-    situation_model: buildSituationModel(state, msg.text),
+    attention,
+    situation_model,
+    director: normalizeDirector({ ...calculatedDirector, ...(isObj(decision.director) ? decision.director : {}) }),
     last_user: clip(msg.text, 500),
     last_agent: clip(speech, 500),
     recent_turns: recent,
@@ -1208,6 +1395,23 @@ function situationBrief(state) {
   ].join("\n");
 }
 
+
+function directorBrief(state) {
+  const d = isObj(state?.working?.director) ? normalizeDirector(state.working.director) : buildInnerDirector(state, "");
+  return [
+    `Намерение: ${d.intent || "нет"}`,
+    `Решение: ${d.decision || "нет"}`,
+    `Приоритет: ${d.priority || "нет"}`,
+    `Стиль: ${d.response_style || "нет"}`,
+    `Действовать: ${d.should_act ? "да" : "нет"}`,
+    `Запомнить: ${d.should_remember ? "да" : "нет"}`,
+    `Спросить: ${d.should_ask ? "да" : "нет"}`,
+    `Остановить: ${d.should_block ? "да" : "нет"}`,
+    `Следующий ход: ${d.next_step || "нет"}`,
+    `Причина: ${d.reason || "нет"}`
+  ].join("\n");
+}
+
 function taskListText(state) {
   const active = activeTasks(state);
   if (!active.length) return "Активных задач нет.";
@@ -1223,7 +1427,7 @@ async function handleCommand(env, c, msg) {
     return [
       "Я на месте, Серёга.",
       "Пиши обычным текстом.",
-      "Команды: /status, /memory, /working, /attention, /situation, /experience, /tasks, /pending, /selftest."
+      "Команды: /status, /memory, /working, /attention, /situation, /director, /experience, /tasks, /pending, /selftest."
     ].join("\n");
   }
 
@@ -1238,6 +1442,7 @@ async function handleCommand(env, c, msg) {
       `Цель: ${state.identity.main_goal}`,
       `Фокус: ${state.working.focus || "нет"}`,
       `Внимание: ${state.working.attention?.primary_signal || "нет"}`,
+      `Директор: ${state.working.director?.decision || "нет"}`,
       `Ситуация: ${state.working.situation_model?.scene || state.working.situation || "нет"}`,
       `Опыт: ${(state.experience || []).length} записей`,
       `Активных задач: ${activeTasks(state).length}`,
@@ -1249,6 +1454,7 @@ async function handleCommand(env, c, msg) {
   if (cmd === "/working") return workingBrief(state);
   if (cmd === "/attention") return attentionBrief(state);
   if (cmd === "/situation") return situationBrief(state);
+  if (cmd === "/director") return directorBrief(state);
   if (cmd === "/experience") return experienceBrief(state);
   if (cmd === "/tasks") return taskListText(state);
   if (cmd === "/pending") return state.pending ? `Жду: ${state.pending.label}` : "Ожиданий нет.";
@@ -1309,6 +1515,7 @@ function selfTestText(env, c, state) {
     ["context manager", "small relevant memory window"],
     ["attention model", "active"],
     ["situation model", "active"],
+    ["inner director", "active"],
     ["fast mind", "disabled for ordinary text"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
@@ -1323,11 +1530,12 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory and attention/situation signals",
+    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory; attention/situation/director guide behavior",
     fast_mind: false,
     context_manager: true,
     attention_model: true,
     situation_model: true,
+    inner_director: true,
     dialogue_continuity: true,
     development_mode: true,
     working_memory: true,
