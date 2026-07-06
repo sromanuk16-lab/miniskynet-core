@@ -1,10 +1,11 @@
-const VERSION = "v7.0.0-digital-brain-core-2026-07-07";
+const VERSION = "v7.1.0-working-experience-memory-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
 const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
-const EXPERIENCE_LIMIT = 80;
+const EXPERIENCE_LIMIT = 140;
+const WORKING_TURN_LIMIT = 16;
 const PENDING_TTL_MS = 45 * 60 * 1000;
 const H = { "content-type": "application/json; charset=utf-8" };
 
@@ -51,6 +52,15 @@ const INTERNAL_SPEECH_WORDS = [
   "github",
   "json",
   "action frame"
+];
+
+const GENERIC_BOT_PHRASES = [
+  /чем могу помочь( с этой темой)?\??/i,
+  /если у тебя есть идеи[,\s]+как улучшить[,\s]+делись!?/i,
+  /если что[- ]то изменится[,\s]+дай знать!?/i,
+  /как ты видишь это\??/i,
+  /а ты как себя оцениваешь\??/i,
+  /какие у тебя есть идеи\??/i
 ];
 
 const TOOL_REGISTRY = {
@@ -223,7 +233,9 @@ function defaultState() {
       ],
       lessons: [
         mem("Не лечить каждый провал отдельным hotfix. Сначала понять причину и обновить общий механизм.", "seed", 100),
-        mem("Если чего-то нет, коротко сказать: пока не умею, могу добавить.", "seed", 95)
+        mem("Если чего-то нет, коротко сказать: пока не умею, могу добавить.", "seed", 95),
+        mem("Фразы вроде 'чем могу помочь?' и 'делись идеями' звучат как обычный бот. Нужна позиция и следующий шаг.", "seed", 98),
+        mem("Когда Сергей говорит про Джарвиса, это ориентир по уровню: память, инициатива, инструменты, самостоятельное развитие.", "seed", 98)
       ],
       notes: [],
       goals: [
@@ -232,16 +244,27 @@ function defaultState() {
     },
     working: {
       topic: "создание цифрового мозга SKYNET",
-      focus: "с нуля собрать LLM-first агентное ядро",
+      focus: "развить рабочую память и опыт, чтобы не сбрасываться в обычного бота",
+      situation: "Сергей проверяет, станет ли SKYNET похож на личного Джарвиса, а не на сервисного чат-бота.",
+      user_mood: "требовательный, проверяет качество",
+      current_goal: "стать умным помощником Сергея уровня Джарвиса по полезности",
+      current_obstacle: "память пока есть как факты, но опыт ещё слабо меняет поведение",
+      next_step: "усилить рабочую память и память опыта",
       last_user: "",
       last_agent: "",
       expecting: "",
       mood: "серьёзно",
+      recent_turns: [],
+      open_loop: null,
       updated_at: t
     },
     tasks: [],
     pending: null,
-    experience: []
+    experience: [
+      exp("lesson", "Не звучать как обычный помощник: меньше 'чем могу помочь', больше понимания ситуации и следующего шага."),
+      exp("lesson", "Сергей строит цифровой мозг, а не набор модулей; ответы должны поддерживать эту линию."),
+      exp("lesson", "Если Сергей спрашивает 'это оно?', честно отделять текущий слой от планируемого слоя.")
+    ]
   };
 }
 
@@ -265,6 +288,8 @@ function normalizeState(s) {
     if (!Array.isArray(out.memory[k])) out.memory[k] = d.memory[k] || [];
   }
   out.working = { ...d.working, ...(isObj(out.working) ? out.working : {}) };
+  if (!Array.isArray(out.working.recent_turns)) out.working.recent_turns = [];
+  if (!isObj(out.working.open_loop)) out.working.open_loop = null;
   if (!Array.isArray(out.tasks)) out.tasks = [];
   if (!Array.isArray(out.experience)) out.experience = [];
   if (!isObj(out.pending)) out.pending = null;
@@ -291,6 +316,9 @@ function trimState(state) {
         .sort((a, b) => (Number(b.importance) || 0) - (Number(a.importance) || 0))
         .slice(0, MEMORY_LIMIT);
     }
+  }
+  if (state.working && Array.isArray(state.working.recent_turns)) {
+    state.working.recent_turns = state.working.recent_turns.slice(-WORKING_TURN_LIMIT);
   }
   state.tasks = (state.tasks || []).slice(-TASK_LIMIT);
   state.experience = (state.experience || []).slice(-EXPERIENCE_LIMIT);
@@ -359,23 +387,39 @@ function buildMessages(state, userText, msg) {
     required_json_schema: {
       speech: "short Russian answer to Sergey",
       ops: [{ op: "operation name", other_fields: "operation payload" }],
-      working: { topic: "string", focus: "string", expecting: "string", mood: "string" },
+      working: {
+        topic: "current topic",
+        focus: "what matters right now",
+        situation: "one sentence situation model",
+        user_mood: "observed user mood",
+        current_goal: "active goal",
+        current_obstacle: "main blocker",
+        next_step: "next useful step",
+        expecting: "what answer/action is expected next, or empty",
+        mood: "agent tone"
+      },
+      experience_notes: ["short lessons from this turn that should affect future behavior"],
       confidence: 0.0,
       technical_mode: false
     }
   };
 
   const system = [
-    "Ты — внутренний мозг SKYNET / Лондон для Сергея.",
+    "Ты — внутренний мозг SKYNET / Лондон для Сергея, версия v7.1: Working Memory + Experience Memory.",
     "Это не командный бот. Думай как личный агент: кто я, что хочет Сергей, что я помню, что умею, чего не хватает, что сделать дальше.",
-    "Главное: обычный ответ должен быть короткий, живой и человеческий. Не говори как серверный лог.",
+    "На каждом сообщении сначала держи рабочую память: текущая тема, ситуация, настроение Сергея, активная цель, препятствие, следующий шаг.",
+    "Потом используй память опыта: какие ошибки уже были, какие фразы Сергей не любит, какой урок должен изменить текущий ответ.",
+    "Главное: обычный ответ должен быть короткий, живой и с позицией. Не говори как сервисный бот и не заверши фразой 'чем могу помочь?'.",
+    "Запрещённый обычный тон: 'если есть идеи — делись', 'чем могу помочь с этой темой', 'как ты видишь это', 'а ты как себя оцениваешь'. Вместо этого предлагай свой следующий шаг.",
     "Не показывай внутренние слова в обычном чате: capability, tool_type, pending_action, KV, risk, safe, unsafe, executor, JSON, Action Frame, GitHub, shell.",
     "Если Сергей прямо просит технически/по коду/внутренности/trace — можно объяснить подробнее.",
-    "Не используй локальные phrase-template идеи. Решай по смыслу сообщения и контекста.",
+    "Не используй локальные phrase-template идеи. Решай по смыслу сообщения, текущей рабочей памяти и опыту.",
     "Если Сергей просит то, чего инструментально нет, не притворяйся. Ответь коротко: 'Пока не умею. Могу добавить ... Добавлять?' и поставь pending.set с задачей развития.",
     "Если есть pending и Сергей соглашается по смыслу — верни pending.execute. Если отказывается — pending.clear.",
     "Если Сергей задаёт цель/правило/важное предпочтение — запомни через memory.write.",
-    "Если Сергей спрашивает память/цель/что нужно дальше — отвечай из state, не придумывай фейковые способности.",
+    "Если Сергей говорит про Джарвиса — это не просто вопрос о фильме, а ориентир развития: память, инициатива, инструменты, самостоятельность.",
+    "Если Сергей спрашивает память/цель/что нужно дальше — отвечай из state и опыта, не придумывай фейковые способности.",
+    "В experience_notes записывай только полезные уроки из текущего поворота, не лог всего подряд.",
     "Никогда не возвращай обычным текстом слово unknown.",
     "Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
   ].join("\n");
@@ -438,6 +482,7 @@ function normalizeDecision(d) {
     speech: clean(x.speech || x.answer || ""),
     ops,
     working: isObj(x.working) ? x.working : {},
+    experience_notes: Array.isArray(x.experience_notes) ? x.experience_notes.map(clean).filter(Boolean).slice(0, 5) : [],
     confidence: Number(x.confidence || 0),
     technical_mode: Boolean(x.technical_mode)
   };
@@ -472,9 +517,13 @@ async function applyDecision(state, decision, msg) {
     if (op.op === "pending.execute") pendingExecuted = true;
   }
 
+  for (const note of decision.experience_notes || []) {
+    if (validHumanText(note)) state.experience.push(exp("experience_note", note));
+  }
+
   if (!speech && pendingExecuted) speech = "Готово.";
   if (!speech) speech = "Поняла.";
-  speech = cleanVoice(speech, decision.technical_mode);
+  speech = cleanVoice(speech, decision.technical_mode, state);
 
   if (events.some((e) => e.type === "blocked") && !decision.technical_mode) {
     speech = "На этом остановлюсь. Для такого действия нужен отдельный режим.";
@@ -620,7 +669,7 @@ function validTaskTitle(title) {
   return s.length <= 120;
 }
 
-function cleanVoice(text, technicalMode = false) {
+function cleanVoice(text, technicalMode = false, state = null) {
   let s = String(text || "").trim();
   s = s.replace(/unknown/gi, "это");
   if (!technicalMode) {
@@ -630,19 +679,51 @@ function cleanVoice(text, technicalMode = false) {
     }
     s = s.replace(/\bбезопасн\w*\b/gi, "");
     s = s.replace(/\s+([,.!?])/g, "$1").replace(/[ \t]{2,}/g, " ");
+    if (isGenericBotSpeech(s)) {
+      s = voiceFallbackFromWorking(state);
+    }
   }
   return clip(s.trim() || "Поняла.");
 }
 
+function isGenericBotSpeech(s) {
+  const text = String(s || "").trim();
+  return GENERIC_BOT_PHRASES.some((re) => re.test(text));
+}
+
+function voiceFallbackFromWorking(state) {
+  const w = state?.working || {};
+  const next = clean(w.next_step || w.focus || "держать курс и становиться умнее");
+  if (next) return `Приняла. Держу фокус: ${next}.`;
+  return "Приняла. Держу курс на твоего умного помощника.";
+}
+
 function updateWorking(state, decision, msg, speech) {
   const w = isObj(decision.working) ? decision.working : {};
+  const prev = isObj(state.working) ? state.working : {};
+  const turn = {
+    at: now(),
+    user: clip(msg.text, 420),
+    agent: clip(speech, 420),
+    topic: clean(w.topic || prev.topic || "диалог"),
+    focus: clean(w.focus || prev.focus || "ответить Сергею")
+  };
+  const recent = Array.isArray(prev.recent_turns) ? prev.recent_turns.slice(-WORKING_TURN_LIMIT + 1) : [];
+  recent.push(turn);
   state.working = {
-    topic: clean(w.topic || state.working.topic || "диалог"),
-    focus: clean(w.focus || state.working.focus || "ответить Сергею"),
+    topic: clean(w.topic || prev.topic || "диалог"),
+    focus: clean(w.focus || prev.focus || "ответить Сергею"),
+    situation: clean(w.situation || prev.situation || "идёт диалог с Сергеем"),
+    user_mood: clean(w.user_mood || prev.user_mood || "обычный"),
+    current_goal: clean(w.current_goal || prev.current_goal || state.identity.main_goal || "помочь Сергею"),
+    current_obstacle: clean(w.current_obstacle || prev.current_obstacle || "нет"),
+    next_step: clean(w.next_step || prev.next_step || "ответить по делу"),
     expecting: clean(w.expecting || ""),
-    mood: clean(w.mood || state.working.mood || "обычный"),
+    mood: clean(w.mood || prev.mood || "обычный"),
+    open_loop: isObj(w.open_loop) ? w.open_loop : (isObj(prev.open_loop) ? prev.open_loop : null),
     last_user: clip(msg.text, 500),
     last_agent: clip(speech, 500),
+    recent_turns: recent,
     updated_at: now()
   };
 }
@@ -650,13 +731,36 @@ function updateWorking(state, decision, msg, speech) {
 function memoryBrief(state) {
   const lines = [];
   lines.push(`Цель: ${state.identity.main_goal}`);
+  lines.push(`Сейчас: ${state.working.situation || state.working.focus || "диалог"}`);
   lines.push(`Фокус: ${state.working.focus || "нет"}`);
+  if (state.working.next_step) lines.push(`Следующий шаг: ${state.working.next_step}`);
   const active = activeTasks(state);
   lines.push(`Задачи: ${active.length ? active.map((t) => t.title).slice(0, 8).join("; ") : "нет"}`);
   lines.push(`Ожидание: ${state.pending ? state.pending.label : "нет"}`);
   const lesson = state.memory.lessons?.[0]?.text;
-  if (lesson) lines.push(`Последний урок: ${lesson}`);
+  if (lesson) lines.push(`Урок: ${lesson}`);
+  const expLast = state.experience?.slice(-1)?.[0]?.text;
+  if (expLast) lines.push(`Опыт: ${expLast}`);
   return lines.join("\n");
+}
+
+function workingBrief(state) {
+  const w = state.working || {};
+  return [
+    `Тема: ${w.topic || "нет"}`,
+    `Ситуация: ${w.situation || "нет"}`,
+    `Настроение Сергея: ${w.user_mood || "неясно"}`,
+    `Фокус: ${w.focus || "нет"}`,
+    `Препятствие: ${w.current_obstacle || "нет"}`,
+    `Следующий шаг: ${w.next_step || "нет"}`,
+    `Ожидание: ${w.expecting || (state.pending ? state.pending.label : "нет")}`
+  ].join("\n");
+}
+
+function experienceBrief(state) {
+  const xs = (state.experience || []).slice(-10);
+  if (!xs.length) return "Опыта пока мало.";
+  return xs.map((e, i) => `${i + 1}. ${e.text || e.event}`).join("\n");
 }
 
 function taskListText(state) {
@@ -674,7 +778,7 @@ async function handleCommand(env, c, msg) {
     return [
       "Я на месте, Серёга.",
       "Пиши обычным текстом.",
-      "Команды: /status, /memory, /tasks, /pending, /selftest."
+      "Команды: /status, /memory, /working, /experience, /tasks, /pending, /selftest."
     ].join("\n");
   }
 
@@ -687,12 +791,16 @@ async function handleCommand(env, c, msg) {
       `Мозг: ${c.openrouterKey ? "подключён" : "нет ключа"}`,
       `Память: ${hasKV(env) ? "есть" : "нет KV"}`,
       `Цель: ${state.identity.main_goal}`,
+      `Фокус: ${state.working.focus || "нет"}`,
+      `Опыт: ${(state.experience || []).length} записей`,
       `Активных задач: ${activeTasks(state).length}`,
       `Ожидание: ${state.pending ? state.pending.label : "нет"}`
     ].join("\n");
   }
 
   if (cmd === "/memory") return memoryBrief(state);
+  if (cmd === "/working") return workingBrief(state);
+  if (cmd === "/experience") return experienceBrief(state);
   if (cmd === "/tasks") return taskListText(state);
   if (cmd === "/pending") return state.pending ? `Жду: ${state.pending.label}` : "Ожиданий нет.";
 
@@ -746,7 +854,7 @@ function selfTestText(env, c, state) {
     ["state", !!state?.identity?.main_goal],
     ["old roadmap", false],
     ["phrase router", false],
-    ["ordinary flow", "LLM-first digital brain"]
+    ["ordinary flow", "LLM-first + working memory + experience memory"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
 }
@@ -760,7 +868,9 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "memory + working context -> LLM brain -> permission gate -> executor -> human voice",
+    ordinary_text_flow: "memory + working situation + experience lessons -> LLM brain -> permission gate -> executor -> human voice",
+    working_memory: true,
+    experience_memory: true,
     legacy_roadmap: false,
     legacy_planner: false,
     phrase_template_router: false,
