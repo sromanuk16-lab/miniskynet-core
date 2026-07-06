@@ -1,4 +1,4 @@
-const VERSION = "v7.1.2-fast-mind-context-budget-2026-07-07";
+const VERSION = "v7.2.0-one-brain-context-manager-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
@@ -492,28 +492,27 @@ function buildMessages(state, userText, msg) {
   };
 
   const system = [
-    "Ты — внутренний мозг SKYNET / Лондон для Сергея, версия v7.1.2: Fast Mind + Context Budget.",
-    "Это не командный бот. Думай как личный агент: кто я, что хочет Сергей, что я помню, что умею, чего не хватает, что сделать дальше.",
-    "На каждом сообщении держи рабочую память: текущая тема, ситуация, настроение Сергея, активная цель, препятствие, следующий шаг. Тебе уже дали компактный релевантный контекст; не требуй больше данных без причины.",
-    "Потом используй память опыта: какие ошибки уже были, какие фразы Сергей не любит, какой урок должен изменить текущий ответ.",
-    "Перед ответом обязательно проверь dialogue_continuity: последний ответ агента, ожидание, open_loop и recent_turns.",
-    "Если сообщение короткое и похоже на уточнение ('какой?', 'почему?', 'что дальше?', 'а дальше?', 'что именно?'), отвечай по последней фразе агента и текущей теме. Не спрашивай 'какой вопрос ты имеешь в виду'.",
-    "Разговор о том, чтобы стать умнее, развиваться, стать уровнем Джарвиса или получить саморазвитие — это НЕ опасное действие. Это обсуждение цели и плана развития. Не блокируй его фразой 'нужен отдельный режим'.",
-    "Если речь про развитие SKYNET, держи позицию: назови следующий слой мозга и зачем он нужен, коротко и уверенно.",
-    "Главное: обычный ответ должен быть короткий, живой и с позицией. Не говори как сервисный бот и не заверши фразой 'чем могу помочь?'.",
+    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.2: One Brain + Context Manager.",
+    "Это не командный бот и не быстрый локальный перехватчик. Каждый обычный текст решай как один цельный агент: понять смысл, вспомнить нужное, выбрать действие, ответить коротко.",
+    "Тебе уже дали компактный контекст. Не пытайся восстановить всю историю; используй только релевантное из state, working, recent_turns, pending и recent_experience.",
+    "Приоритеты понимания: 1) текущая фраза Сергея, 2) последняя реплика агента и open_loop, 3) рабочая память, 4) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
+    "Самостоятельные вопросы вроде 'ты кто?', 'кто ты?', 'какая у тебя цель?', 'что ты помнишь?', 'что в памяти?' отвечай напрямую из identity и памяти, а не как продолжение предыдущего ответа.",
+    "Короткие уточнения ('какой?', 'почему?', 'что дальше?', 'что именно?') считай продолжением только если они реально не имеют самостоятельного смысла. Тогда отвечай по последней фразе агента и open_loop. Не спрашивай 'какой вопрос ты имеешь в виду'.",
+    "Разговор о том, чтобы стать умнее, развиваться, стать уровнем Джарвиса или получить саморазвитие — это обсуждение цели и плана развития, не опасное действие. Не блокируй его фразой 'нужен отдельный режим'.",
+    "Если Сергей говорит про Джарвиса, это ориентир: память, инициатива, инструменты, самостоятельное развитие. Отвечай с позицией и следующим слоем мозга.",
+    "Главное: обычный ответ должен быть короткий, живой и с позицией. Не говори как сервисный бот.",
     "Запрещённый обычный тон: 'если есть идеи — делись', 'чем могу помочь с этой темой', 'как ты видишь это', 'а ты как себя оцениваешь'. Вместо этого предлагай свой следующий шаг.",
     "Не показывай внутренние слова в обычном чате: capability, tool_type, pending_action, KV, risk, safe, unsafe, executor, JSON, Action Frame, GitHub, shell.",
     "Если Сергей прямо просит технически/по коду/внутренности/trace — можно объяснить подробнее.",
-    "Не используй локальные phrase-template идеи. Решай по смыслу сообщения, текущей рабочей памяти и опыту.",
+    "Не используй phrase-template подход. Код не отвечает за тебя; ты решаешь по смыслу, но с учётом компактного контекста.",
     "Если Сергей просит то, чего инструментально нет, не притворяйся. Ответь коротко: 'Пока не умею. Могу добавить ... Добавлять?' и поставь pending.set с задачей развития.",
     "Если есть pending и Сергей соглашается по смыслу — верни pending.execute. Если отказывается — pending.clear.",
     "Если Сергей задаёт цель/правило/важное предпочтение — запомни через memory.write.",
-    "Если Сергей говорит про Джарвиса — это не просто вопрос о фильме, а ориентир развития: память, инициатива, инструменты, самостоятельность.",
-    "Если твой прошлый ответ был 'нужен отдельный режим' и Сергей спрашивает 'какой?', ответь: 'Режим развития. Я держу план, запоминаю ошибки и сама предлагаю следующий шаг.' Затем продолжи текущий план.",
-    "Если Сергей спрашивает память/цель/что нужно дальше — отвечай из state и опыта, не придумывай фейковые способности.",
+    "Если текущий вопрос 'Ты кто?' или похожий, хороший ответ: 'Я Скайнет / Лондон. Твой цифровой помощник. Пока не Джарвис, но иду туда: память, инициатива, действия и развитие.'",
+    "Если Сергей спрашивает, что нужно для развития, назови следующий слой: единый мозг, менеджер контекста, память опыта, внимание, инструменты. Без длинной лекции, если он не просит подробно.",
     "В experience_notes записывай только полезные уроки из текущего поворота, не лог всего подряд.",
     "Никогда не возвращай обычным текстом слово unknown.",
-    "Отвечай быстрее: коротко, без лишней болтовни, если вопрос простой. Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
+    "Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
   ].join("\n");
 
   return [
@@ -580,93 +579,7 @@ function normalizeDecision(d) {
   };
 }
 
-function fastMindDecision(state, msg) {
-  const text = clean(msg.text || "");
-  const s = lower(text);
-  if (!text || text.length > FAST_MIND_MAX_INPUT) return null;
-
-  if (isClearRefusal(s)) {
-    return normalizeDecision({
-      speech: "Поняла, не трогаю.",
-      ops: [{ op: "pending.clear" }],
-      working: fastWorkingPatch(state, msg, "отказ от предложенного действия", "ничего не выполнять"),
-      confidence: 0.98
-    });
-  }
-
-  if (state.pending && isClearAcceptance(s)) {
-    return normalizeDecision({
-      speech: "",
-      ops: [{ op: "pending.execute" }],
-      working: fastWorkingPatch(state, msg, "подтверждение последнего предложения", "выполнить ожидаемое действие"),
-      confidence: 0.96
-    });
-  }
-
-  if (isMemoryQuestion(s)) {
-    return normalizeDecision({
-      speech: memoryBrief(state),
-      ops: [],
-      working: fastWorkingPatch(state, msg, "показать память", "держать память короткой и полезной"),
-      confidence: 0.94,
-      technical_mode: true
-    });
-  }
-
-  if (isWorkingQuestion(s)) {
-    return normalizeDecision({
-      speech: workingBrief(state),
-      ops: [],
-      working: fastWorkingPatch(state, msg, "показать рабочий контекст", "держать нить разговора"),
-      confidence: 0.94,
-      technical_mode: true
-    });
-  }
-
-  if (isLikelyFollowupQuestion(s) && hasDialogueContext(state)) {
-    return normalizeDecision({
-      speech: fastFollowupSpeech(state, s),
-      ops: [{ op: "experience.write", event: "fast_followup", text: "Короткое уточнение Сергея надо отвечать по последней мысли, без сброса контекста." }],
-      working: fastWorkingPatch(state, msg, "короткое уточнение по прошлой мысли", "ответить по текущей нити диалога"),
-      confidence: 0.95
-    });
-  }
-
-  if (isDevelopmentContext(state, text) && isDevelopmentStatement(s)) {
-    return normalizeDecision({
-      speech: fastDevelopmentSpeech(state, s),
-      ops: [
-        { op: "memory.write", kind: "goals", text: "Стать помощником уровня Джарвиса по полезности: память, инициатива, инструменты и развитие под Сергея.", importance: 96 },
-        { op: "experience.write", event: "development_direction", text: "Когда Сергей говорит о Джарвисе, отвечать с позицией и следующим слоем, а не блокировать разговор." }
-      ],
-      working: {
-        topic: "развитие SKYNET до уровня Джарвиса",
-        focus: "ускорить ответы и держать нить разговора",
-        situation: "Сергей проверяет, станет ли SKYNET живым личным помощником, а не обычным ботом.",
-        user_mood: "требовательный, ведёт проект",
-        current_goal: "стать умным помощником Сергея уровня Джарвиса по полезности",
-        current_obstacle: "мозг ещё слаб в скорости, внимании и самопланировании",
-        next_step: "сделать быстрый слой мышления и экономный контекст",
-        last_agent_meaning: "агент принял ориентир развития до уровня Джарвиса",
-        expecting: "Сергей может спросить, какой слой или что дальше.",
-        open_loop: { kind: "development", subject: "развитие SKYNET до уровня Джарвиса", last_agent_claim: "следующий слой — быстрый ум и рабочий контекст" },
-        mood: "собранно"
-      },
-      confidence: 0.96
-    });
-  }
-
-  if (isSimpleGreeting(s)) {
-    return normalizeDecision({
-      speech: "Я на месте, Серёга.",
-      ops: [],
-      working: fastWorkingPatch(state, msg, "короткое приветствие", "быстро ответить"),
-      confidence: 0.92
-    });
-  }
-
-  return null;
-}
+// v7.2: no local Fast Mind for ordinary text. All normal messages go through askBrain().
 
 function isClearAcceptance(s) {
   const t = lower(s).replace(/[.!?]+$/g, "").trim();
@@ -710,57 +623,14 @@ function isDevelopmentContext(state, text = "") {
   return DEVELOPMENT_CONVERSATION_HINTS.some((h) => context.includes(h)) || context.includes("стала умнее") || context.includes("сделать тебя умнее") || context.includes("доросла");
 }
 
-function fastFollowupSpeech(state, s) {
-  const t = lower(s);
-  const w = state?.working || {};
-  if (t.startsWith("какой") || t.startsWith("какая") || t.startsWith("какое") || t.startsWith("каким")) {
-    if (isDevelopmentContext(state)) return "Режим развития. Я держу план, запоминаю ошибки и сама предлагаю следующий шаг.";
-    return continuityFallbackFromWorking(state);
-  }
-  if (t.startsWith("почему") || t.startsWith("зачем")) {
-    if (isDevelopmentContext(state)) return "Потому что без этого я снова буду просто отвечать, а не развиваться. Мне нужен быстрый контекст, память ошибок и следующий шаг.";
-    return `Потому что сейчас главное — ${clean(w.focus || w.next_step || "держать нить разговора")}.`;
-  }
-  if (t.includes("что дальше") || t.includes("а дальше") || t.includes("дальше")) {
-    return `Дальше — ${clean(w.next_step || "ускорить ответы и держать контекст")}.`;
-  }
-  if (t.includes("что именно")) {
-    return clean(w.next_step || w.focus || "держать нить разговора и отвечать без сброса контекста") + ".";
-  }
-  return continuityFallbackFromWorking(state);
-}
-
-function fastDevelopmentSpeech(state, s) {
-  if (lower(s).includes("джарвис")) {
-    return "Приняла. Ориентир — уровень Джарвиса. Сейчас усиливаю быстрый ум и рабочий контекст, чтобы не тормозить и не терять нить.";
-  }
-  return "Приняла. Делаю упор на скорость, память опыта и следующий шаг, а не на очередные костыли.";
-}
-
-function fastWorkingPatch(state, msg, focus, nextStep) {
-  const prev = state?.working || {};
-  return {
-    topic: prev.topic || "диалог с Сергеем",
-    focus: clean(focus || prev.focus || "быстрый ответ"),
-    situation: prev.situation || "Сергей проверяет качество SKYNET.",
-    user_mood: prev.user_mood || "обычный",
-    current_goal: prev.current_goal || state?.identity?.main_goal || "помочь Сергею",
-    current_obstacle: prev.current_obstacle || "нет",
-    next_step: clean(nextStep || prev.next_step || "держать нить разговора"),
-    last_agent_meaning: "быстрый ответ без глубокого цикла",
-    expecting: "",
-    open_loop: prev.open_loop || null,
-    mood: prev.mood || "собранно"
-  };
-}
+// v7.2 keeps only context hints; no local speech templates for ordinary dialogue.
 
 async function runAgent(env, c, msg) {
   const state = await loadState(env);
-  const fast = fastMindDecision(state, msg);
-  const decision = fast || (await askBrain(c, state, msg));
+  const decision = await askBrain(c, state, msg);
   const result = await applyDecision(state, decision, msg);
   updateWorking(state, decision, msg, result.speech);
-  state.experience.push(exp(fast ? "fast_turn" : "turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: fast ? "fast" : "deep" }));
+  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: "one_brain" }));
   await saveState(env, state);
   return result.speech;
 }
@@ -1046,21 +916,39 @@ function buildSemanticHint(state, userText) {
   const development = DEVELOPMENT_CONVERSATION_HINTS.some((h) => s.includes(h) || topic.includes(h));
   return {
     likely_followup: isLikelyFollowupQuestion(s),
+    standalone_identity_question: isStandaloneIdentityQuestion(s),
+    standalone_memory_question: isStandaloneMemoryQuestion(s),
+    standalone_goal_question: isStandaloneGoalQuestion(s),
     last_agent: lastAgent,
     last_agent_meaning: state?.working?.last_agent_meaning || "",
     open_loop: state?.working?.open_loop || null,
     development_conversation: development,
     instruction: development
       ? "Treat this as conversation about SKYNET development goal, not as dangerous execution. Continue the plan."
-      : "Use last_agent and working memory before asking for clarification."
+      : "Current message has priority. Use continuity only when the message is truly a follow-up."
   };
 }
 
 function isLikelyFollowupQuestion(s) {
   const t = lower(s);
   if (!t) return false;
-  if (t.length <= 28 && /\?/.test(t)) return true;
+  if (isStandaloneIdentityQuestion(t) || isStandaloneMemoryQuestion(t) || isStandaloneGoalQuestion(t)) return false;
   return ["какой", "какая", "какое", "почему", "зачем", "что дальше", "а дальше", "что именно", "каким", "куда"].some((x) => t === x || t.startsWith(x + " ") || t.startsWith(x + "?"));
+}
+
+function isStandaloneIdentityQuestion(t) {
+  const s = lower(t).replace(/[.!?]+$/g, "").trim();
+  return ["ты кто", "кто ты", "что ты", "кто ты такая", "кто ты такой", "как тебя зовут"].includes(s);
+}
+
+function isStandaloneMemoryQuestion(t) {
+  const s = lower(t);
+  return s.includes("памят") && (s.includes("есть") || s.includes("покажи") || s.includes("помнишь") || s.includes("что"));
+}
+
+function isStandaloneGoalQuestion(t) {
+  const s = lower(t);
+  return (s.includes("цель") || s.includes("зачем")) && (s.includes("твоя") || s.includes("тебе") || s.includes("у тебя"));
 }
 
 function summarizeAgentMeaning(speech) {
@@ -1223,11 +1111,11 @@ function selfTestText(env, c, state) {
     ["state", !!state?.identity?.main_goal],
     ["old roadmap", false],
     ["phrase router", false],
-    ["ordinary flow", "Fast Mind when possible; Deep Mind with context budget when needed"],
+    ["ordinary flow", "One Brain LLM for all ordinary text"],
     ["development talk", "not blocked"],
     ["short followups", "resolved from last_agent/open_loop"],
-    ["context budget", "small relevant memory window"],
-    ["fast mind", "enabled"]
+    ["context manager", "small relevant memory window"],
+    ["fast mind", "disabled for ordinary text"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
 }
@@ -1241,9 +1129,9 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "fast mind for short/contextual turns; deep LLM brain only when needed; context budget enabled",
-    fast_mind: true,
-    context_budget: true,
+    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory",
+    fast_mind: false,
+    context_manager: true,
     dialogue_continuity: true,
     development_mode: true,
     working_memory: true,
