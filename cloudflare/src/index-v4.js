@@ -1,4 +1,4 @@
-const VERSION = "v7.1.1-dialogue-continuity-development-mode-2026-07-07";
+const VERSION = "v7.1.2-fast-mind-context-budget-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
@@ -6,6 +6,10 @@ const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
 const EXPERIENCE_LIMIT = 140;
 const WORKING_TURN_LIMIT = 16;
+const PROMPT_MEMORY_LIMIT = 8;
+const PROMPT_EXPERIENCE_LIMIT = 6;
+const PROMPT_TURN_LIMIT = 6;
+const FAST_MIND_MAX_INPUT = 280;
 const PENDING_TTL_MS = 45 * 60 * 1000;
 const H = { "content-type": "application/json; charset=utf-8" };
 
@@ -141,6 +145,11 @@ async function cfg(env) {
       String(env.OPENROUTER_MODEL || env.OPENROUTER_MODEL_CHEAP || "").trim() ||
       (await kvText(env, "config:OPENROUTER_MODEL")) ||
       (await kvText(env, "config:OPENROUTER_MODEL_CHEAP")) ||
+      DEFAULT_MODEL,
+    cheapModel:
+      String(env.OPENROUTER_MODEL_CHEAP || env.OPENROUTER_MODEL || "").trim() ||
+      (await kvText(env, "config:OPENROUTER_MODEL_CHEAP")) ||
+      (await kvText(env, "config:OPENROUTER_MODEL")) ||
       DEFAULT_MODEL,
     workerUrl:
       String(env.WORKER_URL || "").trim() ||
@@ -343,29 +352,81 @@ function trimState(state) {
   }
 }
 
-function stateForPrompt(state) {
+function stateForPrompt(state, userText = "") {
   return {
     identity: state.identity,
     memory: {
-      about_user: state.memory.about_user.slice(0, 20).map((m) => m.text),
-      project: state.memory.project.slice(0, 20).map((m) => m.text),
-      decisions: state.memory.decisions.slice(0, 20).map((m) => m.text),
-      lessons: state.memory.lessons.slice(0, 20).map((m) => m.text),
-      goals: state.memory.goals.slice(0, 20).map((m) => m.text),
-      notes: state.memory.notes.slice(0, 20).map((m) => m.text)
+      about_user: pickMemory(state.memory.about_user, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      project: pickMemory(state.memory.project, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      decisions: pickMemory(state.memory.decisions, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      lessons: pickMemory(state.memory.lessons, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      goals: pickMemory(state.memory.goals, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      notes: pickMemory(state.memory.notes, userText, Math.max(4, Math.floor(PROMPT_MEMORY_LIMIT / 2))).map((m) => m.text)
     },
-    working: state.working,
-    active_tasks: activeTasks(state).slice(0, 25).map((t) => ({ id: t.id, title: t.title, details: t.details || "" })),
+    working: workingForPrompt(state),
+    active_tasks: activeTasks(state).slice(0, 12).map((t) => ({ id: t.id, title: t.title, details: t.details || "" })),
     pending: state.pending ? { label: state.pending.label, action: state.pending.action, created_at: state.pending.created_at } : null,
     dialogue_continuity: {
       last_user: state.working?.last_user || "",
       last_agent: state.working?.last_agent || "",
       last_agent_meaning: state.working?.last_agent_meaning || "",
       expecting: state.working?.expecting || "",
-      open_loop: state.working?.open_loop || null
+      open_loop: state.working?.open_loop || null,
+      recent_turns: Array.isArray(state.working?.recent_turns) ? state.working.recent_turns.slice(-PROMPT_TURN_LIMIT) : []
     },
-    recent_experience: state.experience.slice(-12).map((e) => ({ event: e.event, text: e.text, created_at: e.created_at }))
+    recent_experience: state.experience.slice(-PROMPT_EXPERIENCE_LIMIT).map((e) => ({ event: e.event, text: e.text, created_at: e.created_at }))
   };
+}
+
+function workingForPrompt(state) {
+  const w = state.working || {};
+  return {
+    topic: w.topic || "",
+    focus: w.focus || "",
+    situation: w.situation || "",
+    user_mood: w.user_mood || "",
+    current_goal: w.current_goal || "",
+    current_obstacle: w.current_obstacle || "",
+    next_step: w.next_step || "",
+    last_user: w.last_user || "",
+    last_agent: w.last_agent || "",
+    last_agent_meaning: w.last_agent_meaning || "",
+    expecting: w.expecting || "",
+    mood: w.mood || "",
+    open_loop: w.open_loop || null,
+    recent_turns: Array.isArray(w.recent_turns) ? w.recent_turns.slice(-PROMPT_TURN_LIMIT) : [],
+    updated_at: w.updated_at || ""
+  };
+}
+
+function pickMemory(list, userText = "", limit = PROMPT_MEMORY_LIMIT) {
+  const xs = Array.isArray(list) ? list.filter((m) => isObj(m) && clean(m.text)) : [];
+  const q = tokenSet(userText);
+  return xs
+    .map((m, idx) => ({ m, score: memoryScore(m, q, idx) }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, limit)
+    .map((x) => x.m);
+}
+
+function tokenSet(text) {
+  const words = lower(text)
+    .replace(/[ё]/g, "е")
+    .split(/[^a-zа-я0-9]+/i)
+    .map((x) => x.trim())
+    .filter((x) => x.length >= 4);
+  return new Set(words);
+}
+
+function memoryScore(m, q, idx) {
+  let score = Number(m.importance || 0) - idx * 0.01;
+  if (q && q.size) {
+    const mt = tokenSet(m.text || "");
+    let overlap = 0;
+    for (const t of q) if (mt.has(t)) overlap += 1;
+    score += overlap * 18;
+  }
+  return score;
 }
 
 function activeTasks(state) {
@@ -394,7 +455,7 @@ function buildMessages(state, userText, msg) {
     user: { name: "Сергей", telegram_user_id: msg.userId, username: msg.username || "" },
     user_message: userText,
     semantic_hint: buildSemanticHint(state, userText),
-    state: stateForPrompt(state),
+    state: stateForPrompt(state, userText),
     tools: TOOL_REGISTRY,
     allowed_operations: [
       { op: "memory.write", fields: { kind: "about_user|project|decisions|lessons|notes|goals", text: "string", importance: "0-100" } },
@@ -431,9 +492,9 @@ function buildMessages(state, userText, msg) {
   };
 
   const system = [
-    "Ты — внутренний мозг SKYNET / Лондон для Сергея, версия v7.1.1: Dialogue Continuity + Development Mode.",
+    "Ты — внутренний мозг SKYNET / Лондон для Сергея, версия v7.1.2: Fast Mind + Context Budget.",
     "Это не командный бот. Думай как личный агент: кто я, что хочет Сергей, что я помню, что умею, чего не хватает, что сделать дальше.",
-    "На каждом сообщении сначала держи рабочую память: текущая тема, ситуация, настроение Сергея, активная цель, препятствие, следующий шаг.",
+    "На каждом сообщении держи рабочую память: текущая тема, ситуация, настроение Сергея, активная цель, препятствие, следующий шаг. Тебе уже дали компактный релевантный контекст; не требуй больше данных без причины.",
     "Потом используй память опыта: какие ошибки уже были, какие фразы Сергей не любит, какой урок должен изменить текущий ответ.",
     "Перед ответом обязательно проверь dialogue_continuity: последний ответ агента, ожидание, open_loop и recent_turns.",
     "Если сообщение короткое и похоже на уточнение ('какой?', 'почему?', 'что дальше?', 'а дальше?', 'что именно?'), отвечай по последней фразе агента и текущей теме. Не спрашивай 'какой вопрос ты имеешь в виду'.",
@@ -452,7 +513,7 @@ function buildMessages(state, userText, msg) {
     "Если Сергей спрашивает память/цель/что нужно дальше — отвечай из state и опыта, не придумывай фейковые способности.",
     "В experience_notes записывай только полезные уроки из текущего поворота, не лог всего подряд.",
     "Никогда не возвращай обычным текстом слово unknown.",
-    "Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
+    "Отвечай быстрее: коротко, без лишней болтовни, если вопрос простой. Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
   ].join("\n");
 
   return [
@@ -466,8 +527,8 @@ async function askBrain(c, state, msg) {
   const body = {
     model: c.model,
     messages: buildMessages(state, msg.text, msg),
-    temperature: 0.25,
-    max_tokens: 1200,
+    temperature: 0.2,
+    max_tokens: 700,
     response_format: { type: "json_object" }
   };
   const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
@@ -519,12 +580,187 @@ function normalizeDecision(d) {
   };
 }
 
+function fastMindDecision(state, msg) {
+  const text = clean(msg.text || "");
+  const s = lower(text);
+  if (!text || text.length > FAST_MIND_MAX_INPUT) return null;
+
+  if (isClearRefusal(s)) {
+    return normalizeDecision({
+      speech: "Поняла, не трогаю.",
+      ops: [{ op: "pending.clear" }],
+      working: fastWorkingPatch(state, msg, "отказ от предложенного действия", "ничего не выполнять"),
+      confidence: 0.98
+    });
+  }
+
+  if (state.pending && isClearAcceptance(s)) {
+    return normalizeDecision({
+      speech: "",
+      ops: [{ op: "pending.execute" }],
+      working: fastWorkingPatch(state, msg, "подтверждение последнего предложения", "выполнить ожидаемое действие"),
+      confidence: 0.96
+    });
+  }
+
+  if (isMemoryQuestion(s)) {
+    return normalizeDecision({
+      speech: memoryBrief(state),
+      ops: [],
+      working: fastWorkingPatch(state, msg, "показать память", "держать память короткой и полезной"),
+      confidence: 0.94,
+      technical_mode: true
+    });
+  }
+
+  if (isWorkingQuestion(s)) {
+    return normalizeDecision({
+      speech: workingBrief(state),
+      ops: [],
+      working: fastWorkingPatch(state, msg, "показать рабочий контекст", "держать нить разговора"),
+      confidence: 0.94,
+      technical_mode: true
+    });
+  }
+
+  if (isLikelyFollowupQuestion(s) && hasDialogueContext(state)) {
+    return normalizeDecision({
+      speech: fastFollowupSpeech(state, s),
+      ops: [{ op: "experience.write", event: "fast_followup", text: "Короткое уточнение Сергея надо отвечать по последней мысли, без сброса контекста." }],
+      working: fastWorkingPatch(state, msg, "короткое уточнение по прошлой мысли", "ответить по текущей нити диалога"),
+      confidence: 0.95
+    });
+  }
+
+  if (isDevelopmentContext(state, text) && isDevelopmentStatement(s)) {
+    return normalizeDecision({
+      speech: fastDevelopmentSpeech(state, s),
+      ops: [
+        { op: "memory.write", kind: "goals", text: "Стать помощником уровня Джарвиса по полезности: память, инициатива, инструменты и развитие под Сергея.", importance: 96 },
+        { op: "experience.write", event: "development_direction", text: "Когда Сергей говорит о Джарвисе, отвечать с позицией и следующим слоем, а не блокировать разговор." }
+      ],
+      working: {
+        topic: "развитие SKYNET до уровня Джарвиса",
+        focus: "ускорить ответы и держать нить разговора",
+        situation: "Сергей проверяет, станет ли SKYNET живым личным помощником, а не обычным ботом.",
+        user_mood: "требовательный, ведёт проект",
+        current_goal: "стать умным помощником Сергея уровня Джарвиса по полезности",
+        current_obstacle: "мозг ещё слаб в скорости, внимании и самопланировании",
+        next_step: "сделать быстрый слой мышления и экономный контекст",
+        last_agent_meaning: "агент принял ориентир развития до уровня Джарвиса",
+        expecting: "Сергей может спросить, какой слой или что дальше.",
+        open_loop: { kind: "development", subject: "развитие SKYNET до уровня Джарвиса", last_agent_claim: "следующий слой — быстрый ум и рабочий контекст" },
+        mood: "собранно"
+      },
+      confidence: 0.96
+    });
+  }
+
+  if (isSimpleGreeting(s)) {
+    return normalizeDecision({
+      speech: "Я на месте, Серёга.",
+      ops: [],
+      working: fastWorkingPatch(state, msg, "короткое приветствие", "быстро ответить"),
+      confidence: 0.92
+    });
+  }
+
+  return null;
+}
+
+function isClearAcceptance(s) {
+  const t = lower(s).replace(/[.!?]+$/g, "").trim();
+  return ["да", "ага", "ок", "окей", "давай", "добавляй", "делай", "продолжай", "сделай", "сделай это", "запускай"].includes(t);
+}
+
+function isClearRefusal(s) {
+  const t = lower(s).replace(/[.!?]+$/g, "").trim();
+  return ["нет", "не надо", "пока не надо", "отмена", "стоп", "не делай", "ничего не делай"].includes(t);
+}
+
+function isSimpleGreeting(s) {
+  const t = lower(s).replace(/[.!?]+$/g, "").trim();
+  return ["привет", "ку", "йо", "ты тут", "ты здесь", "на месте"].includes(t);
+}
+
+function isMemoryQuestion(s) {
+  const t = lower(s);
+  return t.includes("памят") && (t.includes("покажи") || t.includes("что") || t.includes("есть") || t.includes("помнишь"));
+}
+
+function isWorkingQuestion(s) {
+  const t = lower(s);
+  return (t.includes("рабоч") && t.includes("памят")) || t.includes("текущий контекст") || t.includes("что сейчас происходит");
+}
+
+function hasDialogueContext(state) {
+  const w = state?.working || {};
+  return !!(clean(w.last_agent) || clean(w.last_agent_meaning) || isObj(w.open_loop));
+}
+
+function isDevelopmentStatement(s) {
+  const t = lower(s);
+  if (/[?]/.test(t) && t.length < 90) return false;
+  return DEVELOPMENT_CONVERSATION_HINTS.some((h) => t.includes(h)) || t.includes("стала умнее") || t.includes("сделать тебя умнее") || t.includes("доросла") || t.includes("уровня джарвиса");
+}
+
+function isDevelopmentContext(state, text = "") {
+  const w = state?.working || {};
+  const context = lower([text, w.topic, w.focus, w.situation, w.current_goal, w.next_step, w.last_agent, w.last_agent_meaning, state?.identity?.main_goal].filter(Boolean).join(" "));
+  return DEVELOPMENT_CONVERSATION_HINTS.some((h) => context.includes(h)) || context.includes("стала умнее") || context.includes("сделать тебя умнее") || context.includes("доросла");
+}
+
+function fastFollowupSpeech(state, s) {
+  const t = lower(s);
+  const w = state?.working || {};
+  if (t.startsWith("какой") || t.startsWith("какая") || t.startsWith("какое") || t.startsWith("каким")) {
+    if (isDevelopmentContext(state)) return "Режим развития. Я держу план, запоминаю ошибки и сама предлагаю следующий шаг.";
+    return continuityFallbackFromWorking(state);
+  }
+  if (t.startsWith("почему") || t.startsWith("зачем")) {
+    if (isDevelopmentContext(state)) return "Потому что без этого я снова буду просто отвечать, а не развиваться. Мне нужен быстрый контекст, память ошибок и следующий шаг.";
+    return `Потому что сейчас главное — ${clean(w.focus || w.next_step || "держать нить разговора")}.`;
+  }
+  if (t.includes("что дальше") || t.includes("а дальше") || t.includes("дальше")) {
+    return `Дальше — ${clean(w.next_step || "ускорить ответы и держать контекст")}.`;
+  }
+  if (t.includes("что именно")) {
+    return clean(w.next_step || w.focus || "держать нить разговора и отвечать без сброса контекста") + ".";
+  }
+  return continuityFallbackFromWorking(state);
+}
+
+function fastDevelopmentSpeech(state, s) {
+  if (lower(s).includes("джарвис")) {
+    return "Приняла. Ориентир — уровень Джарвиса. Сейчас усиливаю быстрый ум и рабочий контекст, чтобы не тормозить и не терять нить.";
+  }
+  return "Приняла. Делаю упор на скорость, память опыта и следующий шаг, а не на очередные костыли.";
+}
+
+function fastWorkingPatch(state, msg, focus, nextStep) {
+  const prev = state?.working || {};
+  return {
+    topic: prev.topic || "диалог с Сергеем",
+    focus: clean(focus || prev.focus || "быстрый ответ"),
+    situation: prev.situation || "Сергей проверяет качество SKYNET.",
+    user_mood: prev.user_mood || "обычный",
+    current_goal: prev.current_goal || state?.identity?.main_goal || "помочь Сергею",
+    current_obstacle: prev.current_obstacle || "нет",
+    next_step: clean(nextStep || prev.next_step || "держать нить разговора"),
+    last_agent_meaning: "быстрый ответ без глубокого цикла",
+    expecting: "",
+    open_loop: prev.open_loop || null,
+    mood: prev.mood || "собранно"
+  };
+}
+
 async function runAgent(env, c, msg) {
   const state = await loadState(env);
-  const decision = await askBrain(c, state, msg);
+  const fast = fastMindDecision(state, msg);
+  const decision = fast || (await askBrain(c, state, msg));
   const result = await applyDecision(state, decision, msg);
   updateWorking(state, decision, msg, result.speech);
-  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence }));
+  state.experience.push(exp(fast ? "fast_turn" : "turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: fast ? "fast" : "deep" }));
   await saveState(env, state);
   return result.speech;
 }
@@ -558,7 +794,14 @@ async function applyDecision(state, decision, msg) {
   speech = cleanVoice(speech, decision.technical_mode, state);
 
   if (events.some((e) => e.type === "blocked_dangerous") && !decision.technical_mode) {
-    speech = "На этом остановлюсь. Для такого действия нужен отдельный режим.";
+    if (isDevelopmentContext(state, msg?.text || "")) {
+      speech = cleanVoice(speech, decision.technical_mode, state);
+      if (isBadDevelopmentBlock(speech, state) || !speech || lower(speech).includes("отдельный режим")) {
+        speech = "Приняла. Ориентир — уровень Джарвиса. Следующий шаг — быстрый ум, рабочий контекст и память ошибок.";
+      }
+    } else {
+      speech = "На этом остановлюсь. Для такого действия нужен отдельный режим.";
+    }
   }
   return { speech, events };
 }
@@ -980,9 +1223,11 @@ function selfTestText(env, c, state) {
     ["state", !!state?.identity?.main_goal],
     ["old roadmap", false],
     ["phrase router", false],
-    ["ordinary flow", "LLM-first + dialogue continuity + working memory + experience memory"],
+    ["ordinary flow", "Fast Mind when possible; Deep Mind with context budget when needed"],
     ["development talk", "not blocked"],
-    ["short followups", "resolved from last_agent/open_loop"]
+    ["short followups", "resolved from last_agent/open_loop"],
+    ["context budget", "small relevant memory window"],
+    ["fast mind", "enabled"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
 }
@@ -996,7 +1241,9 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "memory + dialogue continuity + working situation + experience lessons -> LLM brain -> permission gate -> executor -> human voice",
+    ordinary_text_flow: "fast mind for short/contextual turns; deep LLM brain only when needed; context budget enabled",
+    fast_mind: true,
+    context_budget: true,
     dialogue_continuity: true,
     development_mode: true,
     working_memory: true,
