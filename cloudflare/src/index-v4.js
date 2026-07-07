@@ -1,4 +1,4 @@
-// MiniSkynet / Jarvis Core v1.3 — Proactive Configure. 2026-07-07.
+// MiniSkynet / Jarvis Core v1.2 — Proactive Pulse. 2026-07-07.
 // ФИЛОСОФИЯ: один мозг, одна память, два входа:
 //   1) Сергей пишет в Telegram
 //   2) Скайнет сама просыпается по scheduled tick
@@ -6,11 +6,14 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.3-proactive-configure-2026-07-07";
+const VERSION = "jarvis-core-v1.3-thinking-core-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
 const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
+const GOAL_LIMIT = 40;
+const BELIEF_LIMIT = 80;
+const DECISION_LOG_LIMIT = 60;
 const DIALOGUE_LIMIT = 24;
 const PROMPT_MEMORY_LIMIT = 7;
 const PROMPT_DIALOGUE_LIMIT = 10;
@@ -32,6 +35,22 @@ const DEFAULT_PROACTIVE = {
   last_sent_at: "",
   sent_day: "",
   sent_count: 0
+};
+
+const DEFAULT_THINKING = {
+  focus: "MiniSkynet Core",
+  mood: "stable",
+  current_goal_id: "",
+  last_situation: "",
+  last_decision: "",
+  last_reflection_at: "",
+  confidence: 0
+};
+
+const DEFAULT_BELIEFS = {
+  facts: [],
+  assumptions: [],
+  unknowns: []
 };
 
 // ============================================================ CONFIG
@@ -64,20 +83,6 @@ const now = () => new Date().toISOString();
 const dayKey = () => new Date().toISOString().slice(0, 10);
 const minutesSince = (iso) => iso ? Math.floor((Date.now() - Date.parse(iso)) / 60000) : 999999;
 
-
-function clamp(n, min, max) {
-  n = Number(n);
-  if (!Number.isFinite(n)) return min;
-  return Math.max(min, Math.min(max, Math.round(n)));
-}
-
-function pluralHours(mins) {
-  mins = Number(mins || 0);
-  if (mins < 60) return `${mins} мин.`;
-  if (mins % 60 === 0) return `${mins / 60} ч.`;
-  return `${mins} мин.`;
-}
-
 async function loadState(env) {
   const raw = await env.MINISKYNET_KV.get("brain:healthy:state");
   if (raw) { try { return normalize(JSON.parse(raw)); } catch {} }
@@ -95,6 +100,13 @@ function normalize(s) {
   s.mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice(-80) : [];
   s.open_questions = Array.isArray(s.open_questions) ? s.open_questions.slice(-30) : [];
   s.proactive = { ...DEFAULT_PROACTIVE, ...(s.proactive || {}) };
+  s.thinking = { ...DEFAULT_THINKING, ...(s.thinking || {}) };
+  s.goals = Array.isArray(s.goals) ? s.goals.slice(-GOAL_LIMIT) : [];
+  s.beliefs = { ...DEFAULT_BELIEFS, ...(s.beliefs || {}) };
+  s.beliefs.facts = Array.isArray(s.beliefs.facts) ? s.beliefs.facts.slice(-BELIEF_LIMIT) : [];
+  s.beliefs.assumptions = Array.isArray(s.beliefs.assumptions) ? s.beliefs.assumptions.slice(-BELIEF_LIMIT) : [];
+  s.beliefs.unknowns = Array.isArray(s.beliefs.unknowns) ? s.beliefs.unknowns.slice(-BELIEF_LIMIT) : [];
+  s.decision_log = Array.isArray(s.decision_log) ? s.decision_log.slice(-DECISION_LOG_LIMIT) : [];
   s.ownerChatId = s.ownerChatId || "";
   s.ownerUserId = s.ownerUserId || "";
   return s;
@@ -176,6 +188,174 @@ function isLooping(dialogue, candidateReply) {
   return botTurns.some(t => similarity(t.text, candidateReply) > 0.7);
 }
 
+// ============================================================ THINKING CORE v1
+function shortText(v, n = 220) {
+  return String(v || "").replace(/\s+/g, " ").trim().slice(0, n);
+}
+
+function classifyIntent(text, eventType = "user_message") {
+  const low = String(text || "").toLowerCase();
+  if (eventType === "scheduled_tick") return "internal_pulse";
+  if (/^(привет|здаров|ку|hi|hello)\b/i.test(low)) return "small_talk";
+  if (/запомни|помни|сохрани|зафиксируй/i.test(low)) return "memory_request";
+  if (/задач|сделай|делай|почини|добавь|создай|напиши код|патч/i.test(low)) return "action_request";
+  if (/ошиб|не так|неправильно|вр[её]шь|сломал|сломалась|не работает/i.test(low)) return "correction_or_problem";
+  if (/пиши чаще|чаще|раз в час|каждый час/i.test(low)) return "proactive_config";
+  if (/выключи.*сообщ|не пиши сам|молчи/i.test(low)) return "proactive_disable";
+  if (/как|почему|что думаешь|зачем|какие проблемы|мышлен/i.test(low)) return "analysis_question";
+  return "conversation";
+}
+
+function activeGoals(state) {
+  return (state.goals || []).filter(g => g.status !== "done").slice(-5);
+}
+
+function ensureGoal(state, title, priority = 70, nextStep = "") {
+  const t = shortText(title, 180);
+  if (!t) return null;
+  let g = (state.goals || []).find(x => x.status !== "done" && similarity(x.title, t) > 0.75);
+  if (!g) {
+    g = { id: "g" + Math.random().toString(36).slice(2, 7), title: t, status: "active", priority, next_step: shortText(nextStep, 180), t: now() };
+    state.goals.push(g);
+  } else {
+    g.priority = Math.max(g.priority || 0, priority);
+    if (nextStep) g.next_step = shortText(nextStep, 180);
+  }
+  return g;
+}
+
+function addBelief(state, kind, text, confidence = 70, source = "system") {
+  const k = ["facts", "assumptions", "unknowns"].includes(kind) ? kind : "assumptions";
+  const a = shortText(text, 260);
+  if (!a) return false;
+  const arr = state.beliefs[k];
+  if (!arr.some(x => similarity(x.text || x, a) > 0.82)) {
+    arr.push({ text: a, confidence, source, t: now() });
+    state.beliefs[k] = arr.slice(-BELIEF_LIMIT);
+    return true;
+  }
+  return false;
+}
+
+function thinkBeforeAct(state, eventText, opts = {}) {
+  const eventType = opts.eventType || "user_message";
+  const intent = classifyIntent(eventText, eventType);
+  const open = state.tasks.filter(t => t.status !== "done");
+  const goals = activeGoals(state);
+  const situation = eventType === "scheduled_tick"
+    ? "внутренний пульс без нового сообщения Сергея"
+    : `Сергей пишет: ${shortText(eventText, 140)}`;
+
+  let goal = "ответить по делу и не выдумывать";
+  let action = "answer";
+  let confidence = 70;
+  let nextStep = "";
+
+  if (intent === "internal_pulse") {
+    goal = open.length ? "проверить открытые задачи и дать короткий полезный следующий шаг" : "молчать, если нет реальной пользы";
+    action = open.length ? "maybe_proactive" : "silent_if_empty";
+    confidence = open.length ? 68 : 84;
+  } else if (intent === "correction_or_problem") {
+    goal = "признать проблему, понять причину, предложить конкретное исправление";
+    action = "diagnose";
+    confidence = 80;
+  } else if (intent === "action_request") {
+    goal = "выполнить конкретное действие или дать готовый патч";
+    action = "execute_or_plan";
+    confidence = 78;
+    nextStep = "сделать минимальное безопасное изменение";
+  } else if (intent === "analysis_question") {
+    goal = "дать честный анализ и следующий инженерный шаг";
+    action = "analyze";
+    confidence = 76;
+  } else if (intent === "memory_request") {
+    goal = "сохранить важный факт без мусора и секретов";
+    action = "remember";
+    confidence = 82;
+  } else if (intent === "proactive_config" || intent === "proactive_disable") {
+    goal = "настроить самостоятельные сообщения так, чтобы поведение совпадало со словами";
+    action = "configure_proactive";
+    confidence = 86;
+  }
+
+  const currentGoal = goals[goals.length - 1] || null;
+  return {
+    event_type: eventType,
+    intent,
+    situation,
+    goal,
+    suggested_action: action,
+    current_goal: currentGoal ? currentGoal.title : "",
+    open_tasks: open.length,
+    confidence,
+    next_step: nextStep
+  };
+}
+
+function normalizeThought(thought, fallback = {}) {
+  const t = thought && typeof thought === "object" ? thought : {};
+  return {
+    situation: shortText(t.situation || fallback.situation, 220),
+    goal: shortText(t.goal || fallback.goal, 180),
+    decision: shortText(t.decision || t.chosen_action || fallback.suggested_action, 180),
+    confidence: Math.max(0, Math.min(100, Number(t.confidence || fallback.confidence || 0) || 0)),
+    memory_use: Array.isArray(t.memory_use) ? t.memory_use.slice(0, 5).map(x => shortText(x, 120)) : [],
+    next_step: shortText(t.next_step || fallback.next_step, 180),
+    should_remember: !!t.should_remember
+  };
+}
+
+function rememberDecision(state, eventText, out, opts = {}) {
+  const thought = normalizeThought(out?.thought, opts.situation || {});
+  const entry = {
+    t: now(),
+    event_type: opts.eventType || "user_message",
+    intent: opts.situation?.intent || classifyIntent(eventText, opts.eventType),
+    situation: thought.situation,
+    goal: thought.goal,
+    decision: thought.decision,
+    confidence: thought.confidence,
+    op: out?.op || "none",
+    next_step: thought.next_step
+  };
+  state.thinking.last_situation = entry.situation;
+  state.thinking.last_decision = entry.decision;
+  state.thinking.last_reflection_at = entry.t;
+  state.thinking.confidence = entry.confidence;
+  if (entry.goal) state.thinking.focus = entry.goal;
+  state.decision_log.push(entry);
+  state.decision_log = state.decision_log.slice(-DECISION_LOG_LIMIT);
+
+  if (entry.intent === "action_request" && entry.next_step) ensureGoal(state, entry.goal || entry.next_step, entry.confidence || 70, entry.next_step);
+  if (entry.intent === "correction_or_problem") addBelief(state, "unknowns", "Нужно проверить проблему: " + shortText(eventText, 180), 65, "user_message");
+  return entry;
+}
+
+function thinkingReport(state) {
+  const goals = activeGoals(state);
+  const last = (state.decision_log || []).slice(-5);
+  const b = state.beliefs || DEFAULT_BELIEFS;
+  return [
+    "Мышление сейчас:",
+    `• фокус: ${state.thinking.focus || "нет"}`,
+    `• последняя ситуация: ${state.thinking.last_situation || "нет"}`,
+    `• последнее решение: ${state.thinking.last_decision || "нет"}`,
+    `• уверенность: ${state.thinking.confidence || 0}/100`,
+    "",
+    "Активные цели:",
+    goals.length ? goals.map((g, i) => `${i + 1}. ${g.title}${g.next_step ? " → " + g.next_step : ""}`).join("\n") : "нет",
+    "",
+    "Что считаю фактами:",
+    b.facts.length ? b.facts.slice(-5).map((x, i) => `${i + 1}. ${x.text || x}`).join("\n") : "пока мало",
+    "",
+    "Что не знаю точно:",
+    b.unknowns.length ? b.unknowns.slice(-5).map((x, i) => `${i + 1}. ${x.text || x}`).join("\n") : "нет",
+    "",
+    "Последние решения:",
+    last.length ? last.map((x, i) => `${i + 1}. ${x.intent}: ${x.decision || x.goal}`).join("\n") : "нет"
+  ].join("\n");
+}
+
 // ============================================================ REAL CONTEXT
 function buildContext(state, eventText, opts = {}) {
   const openTasks = state.tasks.filter(t => t.status !== "done");
@@ -186,10 +366,18 @@ function buildContext(state, eventText, opts = {}) {
   const lines = [];
   lines.push("РЕАЛЬНОЕ состояние. Опирайся на него, не выдумывай повестку:");
   lines.push(`- событие: ${opts.eventType || "user_message"}`);
+  if (opts.situation) {
+    lines.push(`- карточка мышления: intent=${opts.situation.intent}; goal=${opts.situation.goal}; action=${opts.situation.suggested_action}; confidence=${opts.situation.confidence}`);
+    if (opts.situation.current_goal) lines.push(`- текущая цель: ${opts.situation.current_goal}`);
+  }
   lines.push(`- я: ${sm.name}; роль: ${sm.role}; цель: ${sm.goal}; стиль: ${sm.style}`);
+  lines.push(`- мышление: фокус=${state.thinking.focus || "нет"}; последнее решение=${state.thinking.last_decision || "нет"}; уверенность=${state.thinking.confidence || 0}/100`);
   lines.push("- открытых задач: " + openTasks.length + (openTasks.length ? " → " + openTasks.slice(0, 6).map(t => t.title).join("; ") : ""));
   lines.push(`- самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим: ${p.mode}; минимум пауза: ${p.min_gap_minutes} мин.; сегодня отправлено: ${p.sent_count || 0}/${p.max_per_day || 3}`);
   if (mem.length) lines.push("- релевантная память: " + mem.map(m => m.text || m.lesson).join("; "));
+  if (state.goals.length) lines.push("- активные цели: " + activeGoals(state).map(g => g.title + (g.next_step ? " → " + g.next_step : "")).join("; "));
+  if (state.beliefs.facts.length) lines.push("- точно помню/считаю фактом: " + state.beliefs.facts.slice(-4).map(x => x.text || x).join("; "));
+  if (state.beliefs.unknowns.length) lines.push("- не знаю точно/надо проверить: " + state.beliefs.unknowns.slice(-4).map(x => x.text || x).join("; "));
   if (recentMistakes.length) lines.push("- мои ошибки/уроки, не повторять: " + recentMistakes.map(m => m.what || m.lesson).join("; "));
   if (state.open_questions.length) lines.push("- открытые вопросы: " + state.open_questions.slice(-4).map(q => q.q || q.text || q).join("; "));
   const recent = state.dialogue.slice(-PROMPT_DIALOGUE_LIMIT).map(d => {
@@ -214,7 +402,15 @@ const SYSTEM = `Ты — Скайнет / личный Джарвис Серге
 2. Это сообщение Сергея или внутренний пульс?
 3. Что Сергей хотел или что сейчас важно?
 4. Что я помню и какие задачи открыты?
-5. Надо ответить, спросить, запомнить, создать задачу, включить/выключить самостоятельные сообщения или молчать?
+5. Какая цель сейчас важнее всего?
+6. Какое действие выбрать: ответить, спросить, молчать, запомнить, создать/закрыть задачу, настроить самостоятельные сообщения?
+7. Перед ответом проверь: не повторяюсь ли, не выдумываю ли, не обещаю ли невозможное?
+
+THINKING CORE:
+- В контексте есть карточка мышления. Используй её как основу, но не показывай Сергею внутренние поля.
+- В JSON верни поле thought: короткая внутренняя выжимка решения. Это не для пользователя, а для памяти мышления.
+- thought должен быть коротким: situation, goal, decision, confidence, memory_use, next_step, should_remember.
+- Не пиши длинные рассуждения в thought. Только управленческая карточка.
 
 ВАЖНО ПРО САМОСТОЯТЕЛЬНЫЕ СООБЩЕНИЯ:
 - Если событие scheduled_tick: Сергей сейчас НЕ писал. Это не повод болтать.
@@ -231,7 +427,7 @@ const SYSTEM = `Ты — Скайнет / личный Джарвис Серге
 5. Если Сергей просит включить самостоятельные сообщения — включи. Если просит выключить — выключи.
 
 Верни строго JSON:
-{"mode":"answer|ask|proactive_message|silent","reply":"текст для Сергея или пусто","op":"none|memory.write|task.add|task.close|mistake.write|self.update|open_question.write|proactive.enable|proactive.disable|proactive.configure","arg":"деталь или пусто"}
+{"mode":"answer|ask|proactive_message|silent","reply":"текст для Сергея или пусто","op":"none|memory.write|task.add|task.close|mistake.write|self.update|open_question.write|proactive.enable|proactive.disable|proactive.configure","arg":"деталь или пусто","thought":{"situation":"коротко что произошло","goal":"цель ответа","decision":"выбранное действие","confidence":0,"memory_use":[],"next_step":"коротко следующий шаг или пусто","should_remember":false}}
 
 ОПЕРАЦИИ:
 - memory.write: запомнить факт/предпочтение/установку Сергея.
@@ -241,13 +437,14 @@ const SYSTEM = `Ты — Скайнет / личный Джарвис Серге
 - mistake.write: Сергей поправил тебя или указал ошибку.
 - open_question.write: появился важный вопрос, который стоит задать позже.
 - proactive.enable/proactive.disable: включить/выключить самостоятельные сообщения.
-- proactive.configure: изменить частоту/режим самостоятельных сообщений. Понимай фразы “пиши чаще”, “пиши раз в час”, “пиши каждые 30 минут”, “не чаще 5 раз в день”, “только важное”.
+- proactive.configure: изменить частоту/режим самостоятельных сообщений.
 - none: обычный разговор.`;
 
 async function runBrain(env, c, state, eventText, opts = {}) {
   const eventType = opts.eventType || "user_message";
   const allowSilent = !!opts.allowSilent;
-  const ctx = buildContext(state, eventText, { eventType });
+  const situation = thinkBeforeAct(state, eventText, { eventType });
+  const ctx = buildContext(state, eventText, { eventType, situation });
   const eventLine = eventType === "scheduled_tick"
     ? "Событие: внутренний пульс. Сергей сейчас не писал. Подумай, есть ли реально полезная короткая мысль. Если нет — молчи."
     : "Сергей пишет: " + eventText;
@@ -258,15 +455,16 @@ async function runBrain(env, c, state, eventText, opts = {}) {
   out.op = String(out.op || "none").trim();
   out.arg = String(out.arg || "").trim();
   out.reply = String(out.reply || "").trim();
+  out.thought = normalizeThought(out.thought, situation);
 
   if ((out.mode === "silent" || !out.reply) && allowSilent) {
-    return { mode: "silent", reply: "", op: out.op || "none", arg: out.arg || "" };
+    return { mode: "silent", reply: "", op: out.op || "none", arg: out.arg || "", thought: out.thought };
   }
   if (!out.reply && !allowSilent) out.reply = "Слушаю.";
 
   if (out.reply && isLooping(state.dialogue, out.reply)) {
     state.mistakes.push({ what: "зациклился, повторял ответ", when: now() });
-    if (allowSilent) return { mode: "silent", reply: "", op: "none", arg: "" };
+    if (allowSilent) return { mode: "silent", reply: "", op: "none", arg: "", thought: out.thought };
     const retry = await ask(c,
       SYSTEM + "\n\nВНИМАНИЕ: ты почти повторил прошлый ответ. Ответь иначе, короче и по делу.",
       [{ role: "user", content: "Событие: " + eventLine + "\nПрошлые ответы, не повторяй: " + state.dialogue.filter(d => d.role === "bot").slice(-3).map(d => d.text).join(" / ") }],
@@ -294,83 +492,6 @@ function addMemory(state, text, score = 70) {
     return true;
   }
   return false;
-}
-
-
-function proactiveConfigFromText(text, current = DEFAULT_PROACTIVE) {
-  const raw = String(text || "").toLowerCase().replace(/ё/g, "е");
-  const cfg = {};
-  let touched = false;
-
-  const hasProactiveIntent = /(пиши|писать|сообщени|самостоятельн|сама|уведомля|напоминай|пульс|частот|режим)/i.test(raw);
-  const hasFrequency = /(чаще|реже|кажд|раз в|не чаще|минут|час|день|сутки|important|важн|свободн|обычн|критич)/i.test(raw);
-  if (!hasProactiveIntent && !hasFrequency) return null;
-
-  function setGap(mins, maxPerDay) {
-    cfg.min_gap_minutes = clamp(mins, 10, 1440);
-    if (maxPerDay) cfg.max_per_day = clamp(maxPerDay, 1, 48);
-    touched = true;
-  }
-
-  const minuteMatch = raw.match(/(?:кажд(?:ые|ий|ую)?|раз\s+в|не\s+чаще\s+чем\s+раз\s+в|через)\s+(\d{1,3})\s*(?:мин|минут)/i);
-  if (minuteMatch) {
-    const mins = parseInt(minuteMatch[1], 10);
-    let suggestedMax = mins <= 10 ? 12 : mins <= 30 ? 8 : mins <= 60 ? 6 : 4;
-    setGap(mins, suggestedMax);
-  }
-
-  const hourMatch = raw.match(/(?:кажд(?:ые|ий|ую)?|раз\s+в|не\s+чаще\s+чем\s+раз\s+в|через)\s+(\d{1,2})\s*(?:ч|час|часа|часов)/i);
-  if (hourMatch) {
-    const h = parseInt(hourMatch[1], 10);
-    setGap(h * 60, h <= 1 ? 6 : h == 2 ? 4 : 3);
-  }
-
-  if (!touched && /раз\s+в\s+час|кажд(?:ый|ые)?\s+час|почас/i.test(raw)) setGap(60, 6);
-  if (!touched && !/(^|\s)не\s+чаще/i.test(raw) && (/(пиши|писать).*чаще/i.test(raw) || /чаще/i.test(raw))) {
-    const cur = Number(current.min_gap_minutes || DEFAULT_PROACTIVE.min_gap_minutes);
-    const next = cur > 60 ? 60 : cur > 30 ? 30 : 10;
-    setGap(next, next <= 10 ? 12 : next <= 30 ? 8 : 6);
-  }
-  if (!touched && /(пиши|писать).*реже|реже/i.test(raw)) {
-    const cur = Number(current.min_gap_minutes || DEFAULT_PROACTIVE.min_gap_minutes);
-    const next = cur < 60 ? 60 : cur < 120 ? 120 : cur < 180 ? 180 : 360;
-    setGap(next, next >= 360 ? 2 : next >= 180 ? 3 : 4);
-  }
-
-  const maxDayMatch = raw.match(/(?:не\s+чаще|максимум|до|лимит)\s+(\d{1,2})\s*(?:раз(?:а)?\s+)?(?:в\s+)?(?:день|сутки)/i)
-    || raw.match(/(\d{1,2})\s*раз(?:а)?\s+в\s+(?:день|сутки)/i);
-  if (maxDayMatch) {
-    cfg.max_per_day = clamp(parseInt(maxDayMatch[1], 10), 1, 48);
-    touched = true;
-  }
-
-  if (/только\s+важн|важное|important/i.test(raw)) { cfg.mode = "important_only"; touched = true; }
-  if (/только\s+критич|критич/i.test(raw)) { cfg.mode = "critical_only"; touched = true; }
-  if (/свободнее|обычн(?:ый|ом)?\s+режим|можешь\s+писать\s+свободнее/i.test(raw)) { cfg.mode = "normal"; touched = true; }
-
-  if (/включ/i.test(raw) && /самостоятельн|сообщени|пиши/i.test(raw)) { cfg.enabled = true; touched = true; }
-  if (/выключ|отключ|(^|\s)не\s+пиши/i.test(raw) && /самостоятельн|сообщени|сама|сам/i.test(raw)) { cfg.enabled = false; touched = true; }
-  if (touched && cfg.enabled !== false && /пиши|писать|сообщени|самостоятельн/i.test(raw) && !/(^|\s)не\s+пиши|выключ|отключ/i.test(raw)) cfg.enabled = true;
-
-  return touched ? cfg : null;
-}
-
-function applyProactiveConfig(state, cfg) {
-  if (!cfg) return false;
-  state.proactive = { ...DEFAULT_PROACTIVE, ...(state.proactive || {}) };
-  if (typeof cfg.enabled === "boolean") state.proactive.enabled = cfg.enabled;
-  if (cfg.mode) state.proactive.mode = String(cfg.mode);
-  if (cfg.min_gap_minutes) state.proactive.min_gap_minutes = clamp(cfg.min_gap_minutes, 10, 1440);
-  if (cfg.max_per_day) state.proactive.max_per_day = clamp(cfg.max_per_day, 1, 48);
-  state.proactive.configured_at = now();
-  return true;
-}
-
-function proactiveConfigSummary(state) {
-  const p = state.proactive || DEFAULT_PROACTIVE;
-  const stateTxt = p.enabled ? "включены" : "выключены";
-  let mode = p.mode === "critical_only" ? "только критичное" : p.mode === "normal" ? "обычный" : "только важное";
-  return `Самостоятельные сообщения: ${stateTxt}; режим: ${mode}; пауза: ${pluralHours(p.min_gap_minutes || 180)}; лимит: ${p.max_per_day || 3} в день.`;
 }
 
 function executeOp(state, op, arg) {
@@ -427,7 +548,19 @@ function executeOp(state, op, arg) {
   }
 
   if (op === "proactive.configure") {
-    applyProactiveConfig(state, proactiveConfigFromText(a, state.proactive));
+    if (/тихо|важн/i.test(a)) {
+      state.proactive.mode = "important_only";
+      state.proactive.min_gap_minutes = 180;
+      state.proactive.max_per_day = 3;
+    }
+    if (/част|чаще|кажд|раз в час|час/i.test(a)) {
+      state.proactive.enabled = true;
+      state.proactive.mode = "frequent";
+      state.proactive.min_gap_minutes = 60;
+      state.proactive.max_per_day = 12;
+    }
+    if (/2|два|две/i.test(a) && /час/i.test(a)) { state.proactive.min_gap_minutes = 120; state.proactive.max_per_day = 8; }
+    if (/3|три/i.test(a) && /час/i.test(a)) { state.proactive.min_gap_minutes = 180; state.proactive.max_per_day = 5; }
     return null;
   }
 
@@ -472,6 +605,7 @@ async function proactiveTick(env) {
   );
 
   executeOp(state, out.op, out.arg);
+  rememberDecision(state, "[scheduled_tick]", out, { eventType: "scheduled_tick", situation: thinkBeforeAct(state, "[scheduled_tick]", { eventType: "scheduled_tick" }) });
 
   if (!out.reply || out.mode === "silent" || genericProactiveJunk(out.reply)) {
     await saveState(env, state);
@@ -507,7 +641,9 @@ function memoryReport(state) {
     "Ошибки/уроки:",
     mistakes.length ? mistakes.map((m, i) => `${i + 1}. ${m.what || m.lesson}`).join("\n") : "нет",
     "",
-    `Самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим ${p.mode}; пауза ${p.min_gap_minutes} мин.; сегодня ${p.sent_count || 0}/${p.max_per_day || 3}.`
+    `Самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим ${p.mode}; пауза ${p.min_gap_minutes} мин.; сегодня ${p.sent_count || 0}/${p.max_per_day || 3}.`,
+    "",
+    `Мышление: фокус — ${state.thinking.focus || "нет"}; последнее решение — ${state.thinking.last_decision || "нет"}; уверенность ${state.thinking.confidence || 0}/100.`
   ].join("\n");
 }
 
@@ -519,33 +655,15 @@ async function handle(env, c, chatId, userText, userId = "") {
 
   const low = userText.toLowerCase().trim();
 
-  const directProactiveConfig = proactiveConfigFromText(low, state.proactive);
-  if (directProactiveConfig) {
-    applyProactiveConfig(state, directProactiveConfig);
-    state.dialogue.push({ role: "bot", text: proactiveConfigSummary(state).slice(0, 500), t: now() });
-    await saveState(env, state);
-    await send(c, chatId, "Готово. " + proactiveConfigSummary(state));
-    return;
-  }
-
   if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
     const p = state.proactive;
-    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3} сегодня)`);
+    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nЦелей мышления: ${activeGoals(state).length}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})\nФокус: ${state.thinking.focus || "нет"}`);
     await saveState(env, state); return;
   }
 
-  if (/что ты (сейчас )?думаешь|что у тебя в голове|покажи мысли/.test(low)) {
-    const open = state.tasks.filter(t => t.status !== "done");
-    const mem = pickMemory(state.memory, userText, 4);
-    await send(c, chatId, [
-      "Вот что у меня реально в голове сейчас:",
-      `• я: ${state.self_model.name}, ${state.self_model.role}`,
-      "• открытых задач: " + (open.length ? open.map(t => t.title).join("; ") : "нет"),
-      "• помню о тебе: " + (mem.length ? mem.map(m => m.text || m.lesson).join("; ") : "пока мало"),
-      "• самостоятельные сообщения: " + (state.proactive.enabled ? "включены" : "выключены"),
-      "• о чём говорим: " + (state.dialogue.slice(-3, -1).map(d => d.text).join(" → ") || "начало")
-    ].join("\n"));
+  if (/что ты (сейчас )?думаешь|что у тебя в голове|покажи мысли|thinking|мышление/.test(low)) {
+    await send(c, chatId, thinkingReport(state));
     await saveState(env, state); return;
   }
 
@@ -560,8 +678,25 @@ async function handle(env, c, chatId, userText, userId = "") {
     await saveState(env, state); return;
   }
 
+  if (/пиши чаще|раз в час|каждый час|чаще/i.test(low)) {
+    executeOp(state, "proactive.configure", "часто раз в час");
+    const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
+    rememberDecision(state, userText, { op: "proactive.configure", thought: { situation: "Сергей попросил писать чаще", goal: "настроить частые самостоятельные сообщения", decision: "включить frequent: 60 минут, до 12 в день", confidence: 95, next_step: "проверить Cloudflare cron", should_remember: true } }, { eventType: "user_message", situation });
+    await send(c, chatId, "Включил частый режим: минимум пауза 60 минут, лимит 12 сообщений в день. Важно: Cloudflare Cron Trigger тоже должен быть включён, иначе сам пульс не проснётся.");
+    await saveState(env, state); return;
+  }
+
+  if (/не пиши сам|выключи.*самостоятель|выключи.*сообщ|молчи/i.test(low)) {
+    executeOp(state, "proactive.disable", "");
+    const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
+    rememberDecision(state, userText, { op: "proactive.disable", thought: { situation: "Сергей попросил выключить самостоятельные сообщения", goal: "остановить proactive", decision: "выключить proactive", confidence: 95, should_remember: true } }, { eventType: "user_message", situation });
+    await send(c, chatId, "Выключил самостоятельные сообщения. Теперь пишу только когда ты сам обращаешься.");
+    await saveState(env, state); return;
+  }
+
   const out = await runBrain(env, c, state, userText, { eventType: "user_message" });
   executeOp(state, out.op, out.arg);
+  rememberDecision(state, userText, out, { eventType: "user_message", situation: thinkBeforeAct(state, userText, { eventType: "user_message" }) });
 
   state.dialogue.push({ role: "bot", text: String(out.reply || "").slice(0, 500), t: now() });
   await saveState(env, state);
