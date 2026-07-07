@@ -6,7 +6,7 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.3.2-memory-trust-2026-07-07";
+const VERSION = "jarvis-core-v1.3.3-self-structure-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
 const MEMORY_LIMIT = 160;
@@ -52,6 +52,20 @@ const DEFAULT_BELIEFS = {
   rules: [],
   assumptions: [],
   unknowns: []
+};
+
+const DEFAULT_HANDS = {
+  level: "v0_readonly",
+  can_read_state: true,
+  can_answer: true,
+  can_remember: true,
+  can_manage_goals: true,
+  can_send_proactive: true,
+  can_read_repo: false,
+  can_write_files: false,
+  can_deploy: false,
+  can_self_modify: false,
+  last_action: ""
 };
 
 // ============================================================ CONFIG
@@ -108,6 +122,7 @@ function normalize(s) {
   s.beliefs.rules = normalizeBeliefEntries(Array.isArray(s.beliefs.rules) ? s.beliefs.rules : [], "rules").slice(-BELIEF_LIMIT);
   s.beliefs.assumptions = normalizeBeliefEntries(Array.isArray(s.beliefs.assumptions) ? s.beliefs.assumptions : [], "assumptions").slice(-BELIEF_LIMIT);
   s.beliefs.unknowns = normalizeBeliefEntries(Array.isArray(s.beliefs.unknowns) ? s.beliefs.unknowns : [], "unknowns").slice(-BELIEF_LIMIT);
+  s.hands = { ...DEFAULT_HANDS, ...(s.hands || {}) };
   // Миграция старых записей: правила могли раньше попасть в facts, а facts могли быть только в memory.
   for (const m of s.memory) {
     const txt = m.text || m.lesson || "";
@@ -307,6 +322,7 @@ function classifyIntent(text, eventType = "user_message") {
   if (/ошиб|не так|неправильно|вр[её]шь|сломал|сломалась|не работает/i.test(low)) return "correction_or_problem";
   if (/пиши чаще|чаще|раз в час|каждый час/i.test(low)) return "proactive_config";
   if (/выключи.*сообщ|не пиши сам|молчи/i.test(low)) return "proactive_disable";
+  if (/что ты умеешь|что умеешь|покажи структуру|видишь.*структур|какая.*структур|какие.*руки|покажи руки|hand_status|руки/i.test(low)) return "self_structure";
   if (/как|почему|что думаешь|зачем|какие проблемы|мышлен/i.test(low)) return "analysis_question";
   return "conversation";
 }
@@ -381,6 +397,11 @@ function thinkBeforeAct(state, eventText, opts = {}) {
     goal = "настроить самостоятельные сообщения так, чтобы поведение совпадало со словами";
     action = "configure_proactive";
     confidence = 86;
+  } else if (intent === "self_structure") {
+    goal = "честно показать свою рабочую структуру и ограничения";
+    action = "report_capabilities";
+    confidence = 94;
+    nextStep = "не обещать рук, которых ещё нет";
   }
 
   const currentGoal = goals[goals.length - 1] || null;
@@ -507,8 +528,10 @@ const SYSTEM = `Ты — Скайнет / личный Джарвис Серге
 
 ХАРАКТЕР:
 - Живой русский. Спокойно, умно, с лёгкой сдержанной иронией.
-- Не безликий чат-бот. Не заканчивай фразами "если нужно, дай знать", "чем могу помочь" без причины.
+- Не безликий чат-бот. Не заканчивай фразами "если нужно, дай знать", "чем могу помочь", "как дела" без причины.
+- На приветствие отвечай коротко: "Привет, Серёга. Я на месте." Без дежурных вопросов.
 - На простое отвечай коротко. На серьёзное — содержательно.
+- Если Сергей спрашивает структуру/возможности/руки — отвечай честно: что есть, что частично есть, чего нет.
 - Не показывай внутренний JSON, mode, op, tool, prompt.
 
 МЫШЛЕНИЕ ПЕРЕД ОТВЕТОМ:
@@ -575,6 +598,7 @@ async function runBrain(env, c, state, eventText, opts = {}) {
     return { mode: "silent", reply: "", op: out.op || "none", arg: out.arg || "", thought: out.thought };
   }
   if (!out.reply && !allowSilent) out.reply = "Слушаю.";
+  if (out.reply) out.reply = stripBotTail(out.reply);
 
   if (out.reply && isLooping(state.dialogue, out.reply)) {
     addMistake(state, "зациклился, повторял ответ");
@@ -764,6 +788,91 @@ async function proactiveTick(env) {
   await send(c, chatId, out.reply);
 }
 
+// ============================================================ SELF STRUCTURE v1
+function stripBotTail(text) {
+  let s = String(text || "").trim();
+  s = s.replace(/\s*Если (нужно|хочешь|что-то).*?(дай знать|скажи|напиши)\.?\s*$/i, "");
+  s = s.replace(/\s*(Чем могу помочь\??|Как дела\??)\s*$/i, "");
+  s = s.replace(/\s*Можем настроить это по необходимости\.?\s*$/i, "");
+  return s.trim();
+}
+
+function greetingReply(state) {
+  return `Привет, Серёга. Я на месте. Фокус: ${state.thinking.focus || "держать память честной"}.`;
+}
+
+function identityReply(state) {
+  const sm = state.self_model || DEFAULT_SELF_MODEL;
+  return `Я ${sm.name} — ${sm.role}. Сейчас мой рабочий фокус: ${state.thinking.focus || "держать память честной"}.`;
+}
+
+function focusReply(state) {
+  const goals = activeGoals(state);
+  const main = state.thinking.focus || "молчать, если нет реальной пользы";
+  const g = goals.length ? `\nАктивная цель: ${goals[goals.length - 1].title}${goals[goals.length - 1].next_step ? " → " + goals[goals.length - 1].next_step : ""}` : "\nАктивных целей сейчас нет.";
+  return `Фокус сейчас: ${main}.${g}`;
+}
+
+function desiresReply(state) {
+  const goals = activeGoals(state);
+  const g = goals.length ? ` Сейчас есть рабочая цель: ${goals[goals.length - 1].title}.` : " Сейчас рабочая цель не задана.";
+  return "Желаний как у человека у меня нет. У меня есть фокус, цели, память, правила и выбранные действия." + g;
+}
+
+function proactiveStatusReply(state) {
+  const p = state.proactive || DEFAULT_PROACTIVE;
+  return `Да. Самостоятельные сообщения сейчас ${p.enabled ? "включены" : "выключены"}: режим ${p.mode}, пауза ${p.min_gap_minutes} мин., сегодня ${p.sent_count || 0}/${p.max_per_day || 3}. Пишу первой только если есть польза, задача или важная мысль.`;
+}
+
+function timerReply(state) {
+  const p = state.proactive || DEFAULT_PROACTIVE;
+  return `Таймер сейчас: ${p.min_gap_minutes} мин. Режим: ${p.mode}. Лимит: ${p.sent_count || 0}/${p.max_per_day || 3} сегодня. Состояние: ${p.enabled ? "включён" : "выключен"}.`;
+}
+
+function selfStructureReport(state) {
+  const p = state.proactive || DEFAULT_PROACTIVE;
+  const h = state.hands || DEFAULT_HANDS;
+  const goals = activeGoals(state);
+  const b = state.beliefs || DEFAULT_BELIEFS;
+  return [
+    "Моя рабочая структура сейчас:",
+    "1. Reflex Core — принимаю сообщения, команды, статус, память.",
+    "2. Thinking Core — держу фокус, цель, последнее решение, уверенность.",
+    "3. Memory Trust — разделяю точные факты, правила, предположения и неизвестность.",
+    "4. Proactive Pulse — могу писать первой по таймеру, если есть реальная польза.",
+    "5. Loop Guard — стараюсь не повторять один и тот же ответ.",
+    "6. Hands Gate — честно показываю, какие действия разрешены, а какие ещё нет.",
+    "",
+    "Что уже умею:",
+    "• отвечать Сергею в Telegram;",
+    "• запоминать явные факты по команде «запомни»;",
+    "• показывать память и мышление;",
+    "• держать активные цели мышления;",
+    "• писать первой через scheduled pulse;",
+    "• настраивать частоту самостоятельных сообщений;",
+    "• не добавлять факт в память дважды, если он уже есть.",
+    "",
+    "Что частично умею:",
+    "• думать карточкой: ситуация → цель → решение → уверенность;",
+    "• отличать факт от правила и неизвестности;",
+    "• замечать повторы, но этот слой ещё надо укреплять.",
+    "",
+    "Чего пока не умею без отдельного слоя рук:",
+    `• читать GitHub сама: ${h.can_read_repo ? "да" : "нет"};`,
+    `• менять файлы сама: ${h.can_write_files ? "да" : "нет"};`,
+    `• деплоить сама: ${h.can_deploy ? "да" : "нет"};`,
+    `• самовольно менять свой код: ${h.can_self_modify ? "да" : "нет"}.`,
+    "",
+    "Текущее состояние:",
+    `• версия: ${VERSION}`,
+    `• фокус: ${state.thinking.focus || "нет"}`,
+    `• целей мышления: ${goals.length}`,
+    `• фактов: ${(b.facts || []).length}; правил: ${(b.rules || []).length}; неизвестно: ${(b.unknowns || []).length}`,
+    `• самостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})`,
+    `• руки: ${h.level}`
+  ].join("\n");
+}
+
 // ============================================================ MAIN HANDLER
 function memoryReport(state, showAll = false) {
   const open = state.tasks.filter(t => t.status !== "done");
@@ -811,6 +920,41 @@ async function handle(env, c, chatId, userText, userId = "") {
   state.dialogue.push({ role: "user", text: userText.slice(0, 500), t: now() });
 
   const low = userText.toLowerCase().trim();
+
+  if (/^(привет|здаров|здравствуй|ку|hi|hello)[!.)\s]*$/i.test(low)) {
+    await send(c, chatId, greetingReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/^(ты кто|кто ты|кто ты\?|ты кто\?)$/i.test(low)) {
+    await send(c, chatId, identityReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/на чем фокус|какой фокус|фокус сейчас|текущий фокус/i.test(low)) {
+    await send(c, chatId, focusReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/желани|чего ты хочешь|ты хочешь/i.test(low)) {
+    await send(c, chatId, desiresReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/ты.*можешь.*писать.*перв|можешь.*писать.*сам|пишешь.*перв/i.test(low)) {
+    await send(c, chatId, proactiveStatusReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/какой.*таймер|таймер.*стоит|пауза.*сообщ|режим.*самостоятель/i.test(low)) {
+    await send(c, chatId, timerReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/что ты умеешь|что умеешь|покажи структуру|видишь.*структур|какая.*структур|какие.*руки|покажи руки|hand_status|руки/i.test(low)) {
+    await send(c, chatId, selfStructureReport(state));
+    await saveState(env, state); return;
+  }
 
   const explicitMemory = extractMemoryCommand(userText);
   if (explicitMemory) {
@@ -863,7 +1007,7 @@ async function handle(env, c, chatId, userText, userId = "") {
   if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
     const p = state.proactive;
-    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nЦелей мышления: ${activeGoals(state).length}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})\nФокус: ${state.thinking.focus || "нет"}`);
+    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nЦелей мышления: ${activeGoals(state).length}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})\nФокус: ${state.thinking.focus || "нет"}\nРуки: ${(state.hands || DEFAULT_HANDS).level}`);
     await saveState(env, state); return;
   }
 
