@@ -1,4 +1,4 @@
-const VERSION = "v7.4.0-mistake-learning-2026-07-07";
+const VERSION = "v7.4.1-user-first-director-goal-balance-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
@@ -91,6 +91,14 @@ const TOOL_REGISTRY = {
   background_work: { available: false, human_name: "работа в фоне" },
   code_write: { available: false, slash_only: true, human_name: "изменение кода" }
 };
+
+const USER_FIRST_LESSONS = [
+  "Главная цель развития — фон поведения, а не тема каждого ответа. Не тащи саморазвитие в обычное приветствие или простой вопрос.",
+  "Приветствие Сергея — ответить коротко присутствием: я на месте. Без лекции, плана и вопроса 'чем помочь'.",
+  "Сначала отвечай на текущую реплику Сергея. Только если он явно говорит о развитии — поднимай план развития.",
+  "Не спрашивать 'как ты видишь следующий шаг' и не просить 'делись идеями', если можно самой назвать следующий шаг.",
+  "Не говорить 'я хочу развивать SKYNET' как бот. Лучше: моя цель — стать полезнее для Сергея, следующий шаг — конкретный слой."
+];
 
 const now = () => new Date().toISOString();
 const isObj = (v) => !!v && typeof v === "object" && !Array.isArray(v);
@@ -258,7 +266,9 @@ function defaultState() {
         mem("Фразы вроде 'чем могу помочь?' и 'делись идеями' звучат как обычный бот. Нужна позиция и следующий шаг.", "seed", 98),
         mem("Когда Сергей говорит про Джарвиса, это ориентир по уровню: память, инициатива, инструменты, самостоятельное развитие.", "seed", 98),
         mem("Разговор о развитии SKYNET — это не опасное действие. Не останавливайся фразой 'нужен отдельный режим'; объясняй следующий слой коротко.", "seed", 100),
-        mem("Короткие уточнения Сергея вроде 'какой?', 'почему?', 'что дальше?' надо понимать по последней реплике и текущей теме.", "seed", 100)
+        mem("Короткие уточнения Сергея вроде 'какой?', 'почему?', 'что дальше?' надо понимать по последней реплике и текущей теме.", "seed", 100),
+        mem("Главная цель развития — фон поведения, а не тема каждого ответа. На приветствие отвечать коротко, без разговора о саморазвитии.", "seed", 100),
+        mem("Не перекидывать инициативу на Сергея фразами вроде 'как ты видишь следующий шаг'. Сама называй следующий шаг, если он очевиден.", "seed", 100)
       ],
       mistakes: [
         mem("Ошибка прошлых веток: фиксить симптомы вместо общего механизма. Урок: сначала понять причину, потом менять слой мозга.", "seed", 100),
@@ -342,6 +352,7 @@ function normalizeState(s) {
   for (const k of ["about_user", "project", "decisions", "lessons", "mistakes", "notes", "goals"]) {
     if (!Array.isArray(out.memory[k])) out.memory[k] = d.memory[k] || [];
   }
+  ensureUserFirstLessons(out);
   out.working = { ...d.working, ...(isObj(out.working) ? out.working : {}) };
   if (!isObj(out.working.attention)) out.working.attention = d.working.attention;
   if (!isObj(out.working.situation_model)) out.working.situation_model = d.working.situation_model;
@@ -353,6 +364,15 @@ function normalizeState(s) {
   if (!isObj(out.pending)) out.pending = null;
   out.updated_at = now();
   return out;
+}
+
+function ensureUserFirstLessons(state) {
+  if (!isObj(state.memory)) return;
+  if (!Array.isArray(state.memory.lessons)) state.memory.lessons = [];
+  for (const lesson of USER_FIRST_LESSONS) {
+    const exists = state.memory.lessons.some((m) => similarText(m.text || "", lesson));
+    if (!exists) state.memory.lessons.unshift(mem(lesson, "v7.4.1_user_first", 100));
+  }
 }
 
 async function loadState(env) {
@@ -498,7 +518,8 @@ function buildAttentionModel(state, userText = "") {
   const standaloneIdentity = isStandaloneIdentityQuestion(s);
   const standaloneMemory = isStandaloneMemoryQuestion(s);
   const standaloneGoal = isStandaloneGoalQuestion(s);
-  const followup = isLikelyFollowupQuestion(s) && !standaloneIdentity && !standaloneMemory && !standaloneGoal;
+  const greeting = isSimpleGreeting(text);
+  const followup = isLikelyFollowupQuestion(s) && !standaloneIdentity && !standaloneMemory && !standaloneGoal && !greeting;
   const dev = isDevelopmentContext(state, text) || isDevelopmentStatement(text);
   const askingStatus = s.includes("вис") || s.includes("тормоз") || s.includes("долго") || s.includes("медлен") || s.includes("лага");
   const criticism = s.includes("не то") || s.includes("опять") || s.includes("туп") || s.includes("позор") || s.includes("не смог") || s.includes("плохо");
@@ -510,7 +531,8 @@ function buildAttentionModel(state, userText = "") {
   if (standaloneIdentity || standaloneMemory || standaloneGoal) continuity = "standalone_identity_memory_goal";
 
   let primary = "conversation";
-  if (standaloneIdentity) primary = "identity";
+  if (greeting) primary = "greeting";
+  else if (standaloneIdentity) primary = "identity";
   else if (standaloneMemory) primary = "memory";
   else if (standaloneGoal) primary = "goal";
   else if (dev) primary = "development";
@@ -530,6 +552,7 @@ function buildAttentionModel(state, userText = "") {
     standalone_identity_question: standaloneIdentity,
     standalone_memory_question: standaloneMemory,
     standalone_goal_question: standaloneGoal,
+    is_greeting: greeting,
     user_goal_guess: inferUserGoalGuess(state, text, primary),
     emotional_tone: inferUserTone(text, state),
     response_mode: inferResponseMode(primary, text),
@@ -563,6 +586,7 @@ function buildSituationModel(state, userText = "") {
 }
 
 function inferUserGoalGuess(state, text, primary) {
+  if (primary === "greeting") return "поздороваться и проверить, что агент на месте";
   if (primary === "identity") return "понять, есть ли у агента личность";
   if (primary === "memory") return "проверить, что агент реально помнит";
   if (primary === "goal") return "проверить цель и направление развития";
@@ -583,6 +607,7 @@ function inferUserTone(text, state) {
 }
 
 function inferResponseMode(primary, text) {
+  if (primary === "greeting") return "presence_short";
   if (primary === "criticism_or_quality_check") return "honest_diagnosis_then_next_step";
   if (primary === "runtime_status") return "brief_cause_and_fix_direction";
   if (primary === "development") return "agent_position_with_next_layer";
@@ -594,6 +619,7 @@ function inferResponseMode(primary, text) {
 }
 
 function inferScene(state, userText, attention) {
+  if (attention.primary_signal === "greeting") return "Сергей просто здоровается; нужно коротко подтвердить присутствие, не начинать тему развития.";
   if (attention.primary_signal === "runtime_status") return "Сергей заметил задержки и проверяет, почему мозг отвечает медленно.";
   if (attention.primary_signal === "criticism_or_quality_check") return "Сергей проверяет качество мышления SKYNET и не хочет повторения пути с костылями.";
   if (attention.primary_signal === "development") return "Сергей строит цифровой мозг SKYNET и двигает следующий слой развития.";
@@ -603,6 +629,7 @@ function inferScene(state, userText, attention) {
 }
 
 function inferWhatUserIsDoing(attention) {
+  if (attention.primary_signal === "greeting") return "здоровается";
   if (attention.primary_signal === "runtime_status") return "спрашивает причину задержки/зависания";
   if (attention.primary_signal === "criticism_or_quality_check") return "указывает на ошибку или проверяет качество";
   if (attention.primary_signal === "development") return "задаёт следующий слой развития";
@@ -621,6 +648,7 @@ function inferCurrentTension(attention, state) {
 }
 
 function inferRecommendedMove(attention) {
+  if (attention.primary_signal === "greeting") return "коротко подтвердить присутствие: я на месте";
   if (attention.primary_signal === "runtime_status") return "коротко объяснить причину задержки и предложить Context Manager/Attention без fast-перехватов";
   if (attention.primary_signal === "criticism_or_quality_check") return "признать проблему, назвать причину и следующий слой";
   if (attention.primary_signal === "development") return "принять направление и назвать конкретный следующий слой мозга";
@@ -665,6 +693,16 @@ function buildInnerDirector(state, userText = "") {
     responseStyle = "ack_short";
     nextStep = "очистить ожидание и не выполнять старое действие";
     reason = "Сергей отказался от последнего предложения.";
+  } else if (a.primary_signal === "greeting") {
+    intent = "presence_check";
+    decision = "answer_presence";
+    priority = "respond_to_current_message";
+    responseStyle = "presence_short";
+    shouldRemember = false;
+    shouldAsk = false;
+    shouldAct = false;
+    nextStep = "коротко подтвердить присутствие, без плана развития";
+    reason = "Сергей просто здоровается. Главная цель развития остаётся фоном, не темой ответа.";
   } else if (a.standalone_identity_question) {
     intent = "self_identity";
     decision = "answer_identity";
@@ -888,16 +926,21 @@ function buildMessages(state, userText, msg) {
   };
 
   const system = [
-    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.4: Mistake Learning.",
+    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.4.1: User-First Director / Goal Balance.",
     "Это не командный бот и не быстрый локальный перехватчик. Каждый обычный текст решай как один цельный агент: понять смысл, вспомнить нужное, выбрать действие, ответить коротко.",
     "Перед тобой есть attention, situation_model и director. Attention показывает главный сигнал, situation_model описывает сцену, director выбирает режим поведения: ответить, запомнить, спросить, предложить, действовать или остановить действие.",
     "Director — не шаблон ответа. Это внутренний управляющий слой. Следуй его intent/decision/priority, но формулируй живой короткий ответ сама.",
-    "v7.4 добавляет обучение на ошибках: если Сергей указывает, что ответ слабый/не тот/ботский/тупой, не оправдывайся. Назови коротко ошибку и сохрани урок через mistake.write или experience.write.",
+    "v7.4 добавила обучение на ошибках. v7.4.1 добавляет баланс цели: главная цель развития всегда в фоне, но не навязывай её в обычном чате.",
     "Mistake Learning — не логирование каждого сообщения. Записывай только реальные уроки: что пошло не так, причина, новое правило поведения.",
     "Когда есть ошибка, хорошая наружная форма: 'Да. Ошибка понятна: ... Запомнила: ...' — коротко, без технодампа.",
     "Тебе уже дали компактный контекст. Не пытайся восстановить всю историю; используй только релевантное из attention, situation_model, state, working, recent_turns, pending и recent_experience.",
     "Приоритеты понимания: 1) текущая фраза Сергея, 2) director.intent/decision/priority, 3) attention.primary_signal, 4) situation_model, 5) последняя реплика агента и open_loop, 6) рабочая память, 7) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
-    "Если director.decision указывает answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
+    "User-first правило: сначала отвечай на то, что Сергей сказал сейчас. Цель стать Джарвисом — фон, а не повод каждый раз говорить о саморазвитии.",
+    "Если Сергей просто здоровается — ответь коротко: 'Я на месте, Серёга.' Не начинай обсуждать развитие, ошибки, обратную связь или следующий слой.",
+    "Саморазвитие поднимай только когда Сергей явно говорит про развитие, Джарвиса, мозг, ошибки, план или следующий слой.",
+    "Не спрашивай 'как ты видишь следующий шаг' и не говори 'делись идеями', если можешь сама назвать следующий шаг. Держи инициативу.",
+    "Не говори 'я хочу развивать SKYNET' в сервисном стиле. Говори от роли: моя цель — стать полезнее Сергею; следующий шаг — ...",
+    "Если director.decision указывает answer_presence, answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
     "Если director.should_remember=true, добавь короткий experience.write или memory.write только если есть реальный урок. Не логируй всё подряд.",
     "Если director.should_ask=true, задай один короткий вопрос. Если информации хватает — не спрашивай.",
     "Если director.should_block=true, остановись коротко. Но разговор о развитии/Джарвисе не блокируй.",
@@ -1078,6 +1121,7 @@ async function applyDecision(state, decision, msg) {
   if (!speech && pendingExecuted) speech = "Готово.";
   if (!speech) speech = "Поняла.";
   speech = cleanVoice(speech, decision.technical_mode, state);
+  speech = userFirstVoiceGuard(speech, decision, msg, state);
 
   if (events.some((e) => e.type === "blocked_dangerous") && !decision.technical_mode) {
     if (isDevelopmentContext(state, msg?.text || "")) {
@@ -1287,6 +1331,30 @@ function cleanVoice(text, technicalMode = false, state = null) {
   return clip(s.trim() || "Поняла.");
 }
 
+function userFirstVoiceGuard(text, decision, msg, state) {
+  let s = clean(text);
+  const attention = buildAttentionModel(state, msg?.text || "");
+  if (!decision?.technical_mode && attention.primary_signal === "greeting") {
+    return "Я на месте, Серёга.";
+  }
+  if (!decision?.technical_mode && !attention.is_development_conversation && isSelfDevelopmentOverreach(s)) {
+    if (attention.primary_signal === "identity") return "Я Скайнет / Лондон. Твой цифровой помощник. Моя цель — стать помощником уровня Джарвиса.";
+    if (attention.primary_signal === "memory") return s;
+    if (attention.primary_signal === "criticism_or_quality_check") return s;
+    return "Поняла. Отвечаю по текущей теме, без лишнего ухода в саморазвитие.";
+  }
+  if (!decision?.technical_mode && /как ты видишь следующий шаг\??/i.test(s)) {
+    return "Следующий шаг назову сама, когда он будет нужен.";
+  }
+  return s;
+}
+
+function isSelfDevelopmentOverreach(s) {
+  const t = lower(s);
+  const devWords = ["саморазв", "механизм обратной связи", "развивать skynet", "развития skynet", "следующий слой", "уровень джарвиса"];
+  return devWords.some((w) => t.includes(w));
+}
+
 function isBadDevelopmentBlock(s, state) {
   const text = lower(s);
   if (!(text.includes("нужен отдельный режим") || text.includes("на этом остановлюсь"))) return false;
@@ -1317,10 +1385,7 @@ function isGenericBotSpeech(s) {
 }
 
 function voiceFallbackFromWorking(state) {
-  const w = state?.working || {};
-  const next = clean(w.next_step || w.focus || "держать курс и становиться умнее");
-  if (next) return `Приняла. Держу фокус: ${next}.`;
-  return "Приняла. Держу курс на твоего умного помощника.";
+  return "Приняла. Дальше отвечаю короче и сама держу следующий шаг.";
 }
 
 function updateWorking(state, decision, msg, speech) {
@@ -1708,7 +1773,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // v7.4 deliberately does not do background work yet. The brain can propose it, but not pretend it exists.
+    // v7.4.1 deliberately does not do background work yet. The brain can propose it, but not pretend it exists.
     console.log(`SKYNET scheduled noop ${VERSION}`, event?.cron || "manual");
   }
 };
