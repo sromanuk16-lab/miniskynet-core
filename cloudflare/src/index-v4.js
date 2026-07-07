@@ -6,8 +6,11 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.3.3-self-structure-2026-07-07";
+const VERSION = "jarvis-core-v1.3.5-hands-github-access-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
+
+const DEFAULT_GITHUB_REPO = "sromanuk16-lab/miniskynet-core";
+const DEFAULT_GITHUB_BRANCH = "main";
 
 const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
@@ -55,24 +58,36 @@ const DEFAULT_BELIEFS = {
 };
 
 const DEFAULT_HANDS = {
-  level: "v0_readonly",
+  level: "v0_1_readonly",
+  mode: "read_only",
   can_read_state: true,
   can_answer: true,
   can_remember: true,
   can_manage_goals: true,
   can_send_proactive: true,
   can_read_repo: false,
+  can_read_project_tree: false,
+  can_read_project_files: false,
   can_write_files: false,
   can_deploy: false,
   can_self_modify: false,
-  last_action: ""
+  last_action: "",
+  last_action_at: "",
+  last_error: ""
 };
+
+const HANDS_LOG_LIMIT = 40;
+const HANDS_FILE_MAX_CHARS = 3200;
+const HANDS_TREE_MAX_ITEMS = 40;
+const HANDS_BLOCKED_PATH = /(^|\/)(\.env|env\.|secrets?|tokens?|credentials?|private|id_rsa|wrangler\.toml|package-lock\.json)$/i;
+const HANDS_ALLOWED_TEXT = /\.(js|mjs|cjs|json|md|txt|ts|tsx|jsx|yml|yaml|toml|css|html)$/i;
 
 // ============================================================ CONFIG
 const CFG_KEYS = [
   "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_ID", "OWNER_ID",
   "TELEGRAM_CHAT_ID", "TELEGRAM_OWNER_CHAT_ID",
-  "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_MODEL_CHEAP", "WORKER_URL"
+  "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_MODEL_CHEAP", "WORKER_URL",
+  "GITHUB_TOKEN", "GITHUB_REPO", "GITHUB_OWNER", "GITHUB_BRANCH"
 ];
 
 async function cfg(env) {
@@ -89,7 +104,11 @@ async function cfg(env) {
     owner: c.TELEGRAM_ALLOWED_USER_ID || c.OWNER_ID,
     chatId: c.TELEGRAM_OWNER_CHAT_ID || c.TELEGRAM_CHAT_ID || "",
     openrouter: c.OPENROUTER_API_KEY,
-    model: c.OPENROUTER_MODEL || c.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini"
+    model: c.OPENROUTER_MODEL || c.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini",
+    githubToken: c.GITHUB_TOKEN,
+    githubRepo: c.GITHUB_REPO || DEFAULT_GITHUB_REPO,
+    githubOwner: c.GITHUB_OWNER || "",
+    githubBranch: c.GITHUB_BRANCH || DEFAULT_GITHUB_BRANCH
   };
 }
 
@@ -123,6 +142,12 @@ function normalize(s) {
   s.beliefs.assumptions = normalizeBeliefEntries(Array.isArray(s.beliefs.assumptions) ? s.beliefs.assumptions : [], "assumptions").slice(-BELIEF_LIMIT);
   s.beliefs.unknowns = normalizeBeliefEntries(Array.isArray(s.beliefs.unknowns) ? s.beliefs.unknowns : [], "unknowns").slice(-BELIEF_LIMIT);
   s.hands = { ...DEFAULT_HANDS, ...(s.hands || {}) };
+  s.hands.level = "v0_1_readonly";
+  s.hands.mode = "read_only";
+  s.hands.can_write_files = false;
+  s.hands.can_deploy = false;
+  s.hands.can_self_modify = false;
+  s.hands_log = Array.isArray(s.hands_log) ? s.hands_log.slice(-HANDS_LOG_LIMIT) : [];
   // Миграция старых записей: правила могли раньше попасть в facts, а facts могли быть только в memory.
   for (const m of s.memory) {
     const txt = m.text || m.lesson || "";
@@ -322,6 +347,7 @@ function classifyIntent(text, eventType = "user_message") {
   if (/ошиб|не так|неправильно|вр[её]шь|сломал|сломалась|не работает/i.test(low)) return "correction_or_problem";
   if (/пиши чаще|чаще|раз в час|каждый час/i.test(low)) return "proactive_config";
   if (/выключи.*сообщ|не пиши сам|молчи/i.test(low)) return "proactive_disable";
+  if (/^(\/)?(read_project|repo_status|read_self_file|show_current_code_version|action_log|rollback_info)\b/i.test(low) || /прочитай проект|покажи проект|проверь github|статус github|прочитай файл|покажи файл|прочитай себя|покажи код|журнал действий|action log|rollback/i.test(low)) return "hands_read";
   if (/что ты умеешь|что умеешь|покажи структуру|видишь.*структур|какая.*структур|какие.*руки|покажи руки|hand_status|руки/i.test(low)) return "self_structure";
   if (/как|почему|что думаешь|зачем|какие проблемы|мышлен/i.test(low)) return "analysis_question";
   return "conversation";
@@ -397,6 +423,11 @@ function thinkBeforeAct(state, eventText, opts = {}) {
     goal = "настроить самостоятельные сообщения так, чтобы поведение совпадало со словами";
     action = "configure_proactive";
     confidence = 86;
+  } else if (intent === "hands_read") {
+    goal = "использовать только read-only руки и честно показать, что реально видно";
+    action = "hands_readonly_report";
+    confidence = 92;
+    nextStep = "не менять файлы, не деплоить, не обещать self-modify";
   } else if (intent === "self_structure") {
     goal = "честно показать свою рабочую структуру и ограничения";
     action = "report_capabilities";
@@ -505,6 +536,7 @@ function buildContext(state, eventText, opts = {}) {
   }
   lines.push(`- я: ${sm.name}; роль: ${sm.role}; цель: ${sm.goal}; стиль: ${sm.style}`);
   lines.push(`- мышление: фокус=${state.thinking.focus || "нет"}; последнее решение=${state.thinking.last_decision || "нет"}; уверенность=${state.thinking.confidence || 0}/100`);
+  lines.push(`- руки: ${(state.hands || DEFAULT_HANDS).level}; режим read-only; запись/деплой/самоизменение запрещены`);
   lines.push("- открытых задач: " + openTasks.length + (openTasks.length ? " → " + openTasks.slice(0, 6).map(t => t.title).join("; ") : ""));
   lines.push(`- самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим: ${p.mode}; минимум пауза: ${p.min_gap_minutes} мин.; сегодня отправлено: ${p.sent_count || 0}/${p.max_per_day || 3}`);
   if (mem.length) lines.push("- релевантная память: " + mem.map(m => m.text || m.lesson).join("; "));
@@ -841,7 +873,7 @@ function selfStructureReport(state) {
     "3. Memory Trust — разделяю точные факты, правила, предположения и неизвестность.",
     "4. Proactive Pulse — могу писать первой по таймеру, если есть реальная польза.",
     "5. Loop Guard — стараюсь не повторять один и тот же ответ.",
-    "6. Hands Gate — честно показываю, какие действия разрешены, а какие ещё нет.",
+    "6. Hands v0.1 — read-only глаза: могу проверять своё состояние и, если настроен GitHub, читать дерево/файлы проекта без записи.",
     "",
     "Что уже умею:",
     "• отвечать Сергею в Telegram;",
@@ -850,17 +882,23 @@ function selfStructureReport(state) {
     "• держать активные цели мышления;",
     "• писать первой через scheduled pulse;",
     "• настраивать частоту самостоятельных сообщений;",
-    "• не добавлять факт в память дважды, если он уже есть.",
+    "• не добавлять факт в память дважды, если он уже есть;",
+    "• вести read-only журнал действий рук.",
     "",
     "Что частично умею:",
     "• думать карточкой: ситуация → цель → решение → уверенность;",
     "• отличать факт от правила и неизвестности;",
     "• замечать повторы, но этот слой ещё надо укреплять.",
     "",
-    "Чего пока не умею без отдельного слоя рук:",
-    `• читать GitHub сама: ${h.can_read_repo ? "да" : "нет"};`,
-    `• менять файлы сама: ${h.can_write_files ? "да" : "нет"};`,
-    `• деплоить сама: ${h.can_deploy ? "да" : "нет"};`,
+    "Что умеют руки v0.1:",
+    `• читать своё состояние: ${h.can_read_state ? "да" : "нет"};`,
+    `• читать GitHub при наличии GITHUB_TOKEN: ${h.can_read_repo ? "да" : "нет/нет токена"};`,
+    `• читать дерево проекта: ${h.can_read_project_tree ? "да" : "нет/не настроено"};`,
+    `• читать отдельные безопасные текстовые файлы проекта: ${h.can_read_project_files ? "да" : "нет/не настроено"};`,
+    "",
+    "Что запрещено:",
+    `• менять файлы: ${h.can_write_files ? "да" : "нет"};`,
+    `• деплоить: ${h.can_deploy ? "да" : "нет"};`,
     `• самовольно менять свой код: ${h.can_self_modify ? "да" : "нет"}.`,
     "",
     "Текущее состояние:",
@@ -870,6 +908,254 @@ function selfStructureReport(state) {
     `• фактов: ${(b.facts || []).length}; правил: ${(b.rules || []).length}; неизвестно: ${(b.unknowns || []).length}`,
     `• самостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})`,
     `• руки: ${h.level}`
+  ].join("\n");
+}
+
+
+// ============================================================ HANDS v0.1 — READ ONLY
+function resolveGithubRepo(c) {
+  const raw = String(c.githubRepo || "").trim().replace(/^https:\/\/github\.com\//i, "").replace(/\.git$/i, "").replace(/^\/+|\/+$/g, "");
+  if (raw.includes("/")) {
+    const [owner, repo] = raw.split("/");
+    return { owner, repo };
+  }
+  if (c.githubOwner && raw) return { owner: c.githubOwner, repo: raw };
+  return { owner: "", repo: "" };
+}
+
+function githubReady(c) {
+  const r = resolveGithubRepo(c);
+  return !!(c.githubToken && r.owner && r.repo);
+}
+
+function refreshHandsCapabilities(state, c) {
+  state.hands = { ...DEFAULT_HANDS, ...(state.hands || {}) };
+  const gh = githubReady(c);
+  state.hands.level = "v0_1_readonly";
+  state.hands.mode = "read_only";
+  state.hands.can_read_state = true;
+  state.hands.can_answer = true;
+  state.hands.can_remember = true;
+  state.hands.can_manage_goals = true;
+  state.hands.can_send_proactive = true;
+  state.hands.can_read_repo = gh;
+  state.hands.can_read_project_tree = gh;
+  state.hands.can_read_project_files = gh;
+  state.hands.can_write_files = false;
+  state.hands.can_deploy = false;
+  state.hands.can_self_modify = false;
+  return state.hands;
+}
+
+function logHand(state, action, ok = true, detail = "") {
+  const a = shortText(action, 140);
+  const d = shortText(detail, 240);
+  state.hands = { ...DEFAULT_HANDS, ...(state.hands || {}) };
+  state.hands.last_action = a;
+  state.hands.last_action_at = now();
+  state.hands.last_error = ok ? "" : d;
+  state.hands_log = Array.isArray(state.hands_log) ? state.hands_log : [];
+  state.hands_log.push({ t: now(), action: a, ok: !!ok, detail: d });
+  state.hands_log = state.hands_log.slice(-HANDS_LOG_LIMIT);
+}
+
+function handStatusReport(state, c) {
+  const h = refreshHandsCapabilities(state, c);
+  const repo = resolveGithubRepo(c);
+  return [
+    "Hands v0.1 / read-only:",
+    `• уровень: ${h.level}`,
+    `• режим: ${h.mode}`,
+    `• читать состояние: ${h.can_read_state ? "да" : "нет"}`,
+    `• читать GitHub: ${h.can_read_repo ? "да" : "нет"}`,
+    `• репозиторий: ${repo.owner && repo.repo ? repo.owner + "/" + repo.repo : "не настроен"}`,
+    `• ветка: ${c.githubBranch || DEFAULT_GITHUB_BRANCH}`,
+    `• repo по умолчанию: ${DEFAULT_GITHUB_REPO}`,
+    `• читать дерево проекта: ${h.can_read_project_tree ? "да" : "нет"}`,
+    `• читать безопасные текстовые файлы: ${h.can_read_project_files ? "да" : "нет"}`,
+    "",
+    "Запрещено:",
+    `• запись файлов: ${h.can_write_files ? "да" : "нет"}`,
+    `• деплой: ${h.can_deploy ? "да" : "нет"}`,
+    `• самоизменение: ${h.can_self_modify ? "да" : "нет"}`,
+    "",
+    `Последнее действие: ${h.last_action || "нет"}${h.last_action_at ? " @ " + h.last_action_at : ""}`,
+    h.last_error ? `Последняя ошибка: ${h.last_error}` : "Последняя ошибка: нет"
+  ].join("\n");
+}
+
+function githubHeaders(c) {
+  const h = { "accept": "application/vnd.github+json", "user-agent": "MiniSkynet-Hands-v0.1" };
+  if (c.githubToken) h.authorization = "Bearer " + c.githubToken;
+  return h;
+}
+
+function cleanRepoPath(path) {
+  let p = String(path || "").trim();
+  p = p.replace(/^['"«»“”]+|['"«»“”]+$/g, "");
+  p = p.replace(/^\/+/, "").replace(/\?.*$/, "");
+  p = p.replace(/\.\./g, "");
+  return p;
+}
+
+function pathAllowed(path) {
+  const p = cleanRepoPath(path);
+  if (!p) return true;
+  if (HANDS_BLOCKED_PATH.test(p)) return false;
+  if (/\b(secret|token|credential|password|private[_-]?key)\b/i.test(p)) return false;
+  return true;
+}
+
+function fileAllowed(path) {
+  const p = cleanRepoPath(path);
+  return pathAllowed(p) && HANDS_ALLOWED_TEXT.test(p) && !HANDS_BLOCKED_PATH.test(p);
+}
+
+async function githubContents(c, path = "") {
+  const repo = resolveGithubRepo(c);
+  if (!githubReady(c)) return { ok: false, error: "GitHub read-only не настроен: нужны GITHUB_TOKEN и GITHUB_REPO." };
+  const p = cleanRepoPath(path);
+  if (!pathAllowed(p)) return { ok: false, error: "Путь заблокирован политикой read-only рук." };
+  const ref = encodeURIComponent(c.githubBranch || "main");
+  const url = `https://api.github.com/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/contents/${p}?ref=${ref}`;
+  const r = await fetch(url, { headers: githubHeaders(c) });
+  const txt = await r.text().catch(() => "");
+  let data = null;
+  try { data = JSON.parse(txt); } catch { data = txt; }
+  if (!r.ok) return { ok: false, status: r.status, error: typeof data === "object" ? (data.message || JSON.stringify(data).slice(0, 200)) : String(data).slice(0, 200) };
+  return { ok: true, data };
+}
+
+function decodeGithubContent(item) {
+  const raw = String(item?.content || "").replace(/\s+/g, "");
+  try {
+    const bin = atob(raw);
+    const bytes = Uint8Array.from(bin, ch => ch.charCodeAt(0));
+    return new TextDecoder("utf-8").decode(bytes);
+  } catch {
+    try { return atob(raw); } catch { return ""; }
+  }
+}
+
+async function repoStatusReport(state, c) {
+  refreshHandsCapabilities(state, c);
+  const repo = resolveGithubRepo(c);
+  if (!githubReady(c)) {
+    logHand(state, "repo_status", false, "GitHub не настроен");
+    return [
+      "GitHub read-only: не подключён.",
+      "Нужно задать в Cloudflare:",
+      "• GITHUB_TOKEN",
+      `• GITHUB_REPO уже есть по умолчанию: ${DEFAULT_GITHUB_REPO}`,
+      `• GITHUB_BRANCH уже есть по умолчанию: ${DEFAULT_GITHUB_BRANCH}`,
+      "",
+      "Для чтения нужен только GITHUB_TOKEN. Права записи не нужны."
+    ].join("\n");
+  }
+  const res = await githubContents(c, "");
+  if (!res.ok) {
+    logHand(state, "repo_status", false, res.error || "GitHub error");
+    return `GitHub read-only подключён, но проверка не прошла: ${res.status || ""} ${res.error || "ошибка"}`.trim();
+  }
+  const count = Array.isArray(res.data) ? res.data.length : 1;
+  logHand(state, "repo_status", true, `${repo.owner}/${repo.repo}, root items=${count}`);
+  return [
+    "GitHub read-only: подключён.",
+    `Репозиторий: ${repo.owner}/${repo.repo}`,
+    `Ветка: ${c.githubBranch || "main"}`,
+    `Корневых элементов видно: ${count}`,
+    "Запись/деплой/самоизменение: запрещены."
+  ].join("\n");
+}
+
+async function projectTreeReport(state, c, path = "") {
+  refreshHandsCapabilities(state, c);
+  const p = cleanRepoPath(path);
+  const res = await githubContents(c, p);
+  if (!res.ok) {
+    logHand(state, "read_project_tree", false, res.error || "GitHub error");
+    return "Не смог прочитать дерево проекта: " + (res.error || "ошибка");
+  }
+  if (!Array.isArray(res.data)) {
+    logHand(state, "read_project_tree", false, "path is not directory");
+    return "Это не папка. Для файла используй: /read_file путь/к/файлу";
+  }
+  const items = res.data.slice(0, HANDS_TREE_MAX_ITEMS).map(x => {
+    const icon = x.type === "dir" ? "📁" : "📄";
+    const size = x.type === "file" && typeof x.size === "number" ? ` (${x.size} б)` : "";
+    return `${icon} ${x.path}${size}`;
+  });
+  const more = res.data.length > HANDS_TREE_MAX_ITEMS ? `\n…ещё ${res.data.length - HANDS_TREE_MAX_ITEMS}` : "";
+  logHand(state, "read_project_tree", true, p || "/");
+  return [`Дерево проекта${p ? " / " + p : ""}:`, ...items, more].filter(Boolean).join("\n");
+}
+
+async function projectFileReport(state, c, path) {
+  refreshHandsCapabilities(state, c);
+  const p = cleanRepoPath(path || "index-v4.js");
+  if (!p) return "Укажи файл: /read_file index-v4.js";
+  if (!fileAllowed(p)) {
+    logHand(state, "read_project_file", false, "blocked: " + p);
+    return "Не читаю этот файл: путь заблокирован или это не безопасный текстовый файл.";
+  }
+  const res = await githubContents(c, p);
+  if (!res.ok) {
+    logHand(state, "read_project_file", false, res.error || "GitHub error");
+    return "Не смог прочитать файл: " + (res.error || "ошибка");
+  }
+  const item = res.data;
+  if (Array.isArray(item) || item.type !== "file") return "Это не файл. Для папки используй: /read_project путь";
+  const text = decodeGithubContent(item);
+  const cut = text.length > HANDS_FILE_MAX_CHARS;
+  const body = (cut ? text.slice(0, HANDS_FILE_MAX_CHARS) + `\n…обрезано, полный размер ${text.length} символов` : text).trim();
+  logHand(state, "read_project_file", true, `${p}, ${text.length} chars`);
+  return [`Файл: ${p}`, `Размер: ${item.size || text.length} б`, "", body || "пусто"].join("\n");
+}
+
+function extractReadFilePath(text) {
+  const raw = String(text || "").trim();
+  let m = raw.match(/^\/?read_file\s+(.+)$/i);
+  if (m) return cleanRepoPath(m[1]);
+  m = raw.match(/^(?:прочитай|покажи)\s+файл\s+(.+)$/i);
+  if (m) return cleanRepoPath(m[1]);
+  m = raw.match(/^\/read_self_file\b/i);
+  if (m) return "index-v4.js";
+  if (/прочитай себя|покажи код|свой файл/i.test(raw)) return "index-v4.js";
+  return "";
+}
+
+function extractReadProjectPath(text) {
+  const raw = String(text || "").trim();
+  let m = raw.match(/^\/?read_project\s+(.+)$/i);
+  if (m) return cleanRepoPath(m[1]);
+  m = raw.match(/^(?:прочитай|покажи)\s+проект\s+(.+)$/i);
+  if (m && !/целиком|весь/i.test(m[1])) return cleanRepoPath(m[1]);
+  return "";
+}
+
+function actionLogReport(state) {
+  const log = (state.hands_log || []).slice(-10);
+  if (!log.length) return "Журнал рук пуст. Read-only действий ещё не было.";
+  return ["Последние действия рук:", ...log.map((x, i) => `${i + 1}. ${x.t} — ${x.action}: ${x.ok ? "ok" : "error"}${x.detail ? " — " + x.detail : ""}`)].join("\n");
+}
+
+function rollbackInfoReport(state) {
+  logHand(state, "rollback_info", true, "read-only info");
+  return [
+    "Rollback-информация:",
+    "• Hands v0.1 ничего не пишет в файлы и не деплоит, поэтому откатывать действия рук обычно нечего.",
+    "• Если новый Worker сломался: верни предыдущий zip/index-v4.js и нажми Deploy в Cloudflare.",
+    "• Состояние хранится в KV: brain:healthy:state.",
+    "• Перед опасными руками v1/v2 нужен backup KV и отдельная ветка GitHub."
+  ].join("\n");
+}
+
+function currentCodeVersionReport(state) {
+  logHand(state, "show_current_code_version", true, VERSION);
+  return [
+    `Текущая версия ядра: ${VERSION}`,
+    `Руки: ${(state.hands || DEFAULT_HANDS).level}`,
+    "Важно: эту версию я знаю из константы VERSION внутри запущенного Worker. Сам исходный файл читаю только если подключён GitHub read-only."
   ].join("\n");
 }
 
@@ -915,6 +1201,7 @@ function memoryReport(state, showAll = false) {
 
 async function handle(env, c, chatId, userText, userId = "") {
   const state = await loadState(env);
+  refreshHandsCapabilities(state, c);
   state.ownerChatId = String(chatId || state.ownerChatId || "");
   state.ownerUserId = String(userId || state.ownerUserId || "");
   state.dialogue.push({ role: "user", text: userText.slice(0, 500), t: now() });
@@ -948,6 +1235,48 @@ async function handle(env, c, chatId, userText, userId = "") {
 
   if (/какой.*таймер|таймер.*стоит|пауза.*сообщ|режим.*самостоятель/i.test(low)) {
     await send(c, chatId, timerReply(state));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?(hand_status|hands_status)\b/i.test(low) || /^покажи руки$/i.test(low) || /^руки$/i.test(low)) {
+    logHand(state, "hand_status", true, "status report");
+    await send(c, chatId, handStatusReport(state, c));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?repo_status\b/i.test(low) || /проверь github|статус github|github статус/i.test(low)) {
+    await send(c, chatId, await repoStatusReport(state, c));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?show_current_code_version\b/i.test(low) || /текущ.*верси.*код|версия.*код/i.test(low)) {
+    await send(c, chatId, currentCodeVersionReport(state));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?action_log\b/i.test(low) || /журнал действий|action log/i.test(low)) {
+    await send(c, chatId, actionLogReport(state));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?rollback_info\b/i.test(low) || /rollback|откат/i.test(low)) {
+    await send(c, chatId, rollbackInfoReport(state));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?read_self_file\b/i.test(low) || /прочитай себя|покажи код|свой файл/i.test(low)) {
+    await send(c, chatId, await projectFileReport(state, c, "index-v4.js"));
+    await saveState(env, state); return;
+  }
+
+  const handsFilePath = extractReadFilePath(userText);
+  if (handsFilePath) {
+    await send(c, chatId, await projectFileReport(state, c, handsFilePath));
+    await saveState(env, state); return;
+  }
+
+  if (/^\/?read_project\b/i.test(low) || /прочитай проект|покажи проект/i.test(low)) {
+    await send(c, chatId, await projectTreeReport(state, c, extractReadProjectPath(userText)));
     await saveState(env, state); return;
   }
 
@@ -1007,7 +1336,15 @@ async function handle(env, c, chatId, userText, userId = "") {
   if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
     const p = state.proactive;
-    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nЦелей мышления: ${activeGoals(state).length}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})\nФокус: ${state.thinking.focus || "нет"}\nРуки: ${(state.hands || DEFAULT_HANDS).level}`);
+    const h = refreshHandsCapabilities(state, c);
+    await send(c, chatId, `Версия: ${VERSION}
+Открытых задач: ${open}
+Целей мышления: ${activeGoals(state).length}
+В памяти: ${state.memory.length}
+Ошибок/уроков: ${state.mistakes.length}
+Самостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3})
+Фокус: ${state.thinking.focus || "нет"}
+Руки: ${h.level} (${h.mode}, GitHub read: ${h.can_read_repo ? "on" : "off"})`);
     await saveState(env, state); return;
   }
 
@@ -1061,7 +1398,7 @@ export default {
 
     if (url.pathname === "/" || url.pathname === "/health" || url.pathname === "/status") {
       return new Response(JSON.stringify({ ok: true, version: VERSION,
-        has: { telegram: !!c.telegram, model: !!c.openrouter, kv: !!c.kv, proactive_chat: !!c.chatId } }), { headers: H });
+        has: { telegram: !!c.telegram, model: !!c.openrouter, kv: !!c.kv, proactive_chat: !!c.chatId, github_read: githubReady(c) } }), { headers: H });
     }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
