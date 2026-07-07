@@ -1,4 +1,4 @@
-// MiniSkynet / Jarvis Core v1.2 — Proactive Pulse. 2026-07-07.
+// MiniSkynet / Jarvis Core v1.3 — Proactive Configure. 2026-07-07.
 // ФИЛОСОФИЯ: один мозг, одна память, два входа:
 //   1) Сергей пишет в Telegram
 //   2) Скайнет сама просыпается по scheduled tick
@@ -6,7 +6,7 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.2-proactive-pulse-2026-07-07";
+const VERSION = "jarvis-core-v1.3-proactive-configure-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
 const MEMORY_LIMIT = 160;
@@ -63,6 +63,20 @@ async function cfg(env) {
 const now = () => new Date().toISOString();
 const dayKey = () => new Date().toISOString().slice(0, 10);
 const minutesSince = (iso) => iso ? Math.floor((Date.now() - Date.parse(iso)) / 60000) : 999999;
+
+
+function clamp(n, min, max) {
+  n = Number(n);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.round(n)));
+}
+
+function pluralHours(mins) {
+  mins = Number(mins || 0);
+  if (mins < 60) return `${mins} мин.`;
+  if (mins % 60 === 0) return `${mins / 60} ч.`;
+  return `${mins} мин.`;
+}
 
 async function loadState(env) {
   const raw = await env.MINISKYNET_KV.get("brain:healthy:state");
@@ -227,7 +241,7 @@ const SYSTEM = `Ты — Скайнет / личный Джарвис Серге
 - mistake.write: Сергей поправил тебя или указал ошибку.
 - open_question.write: появился важный вопрос, который стоит задать позже.
 - proactive.enable/proactive.disable: включить/выключить самостоятельные сообщения.
-- proactive.configure: изменить частоту/режим самостоятельных сообщений.
+- proactive.configure: изменить частоту/режим самостоятельных сообщений. Понимай фразы “пиши чаще”, “пиши раз в час”, “пиши каждые 30 минут”, “не чаще 5 раз в день”, “только важное”.
 - none: обычный разговор.`;
 
 async function runBrain(env, c, state, eventText, opts = {}) {
@@ -280,6 +294,83 @@ function addMemory(state, text, score = 70) {
     return true;
   }
   return false;
+}
+
+
+function proactiveConfigFromText(text, current = DEFAULT_PROACTIVE) {
+  const raw = String(text || "").toLowerCase().replace(/ё/g, "е");
+  const cfg = {};
+  let touched = false;
+
+  const hasProactiveIntent = /(пиши|писать|сообщени|самостоятельн|сама|уведомля|напоминай|пульс|частот|режим)/i.test(raw);
+  const hasFrequency = /(чаще|реже|кажд|раз в|не чаще|минут|час|день|сутки|important|важн|свободн|обычн|критич)/i.test(raw);
+  if (!hasProactiveIntent && !hasFrequency) return null;
+
+  function setGap(mins, maxPerDay) {
+    cfg.min_gap_minutes = clamp(mins, 10, 1440);
+    if (maxPerDay) cfg.max_per_day = clamp(maxPerDay, 1, 48);
+    touched = true;
+  }
+
+  const minuteMatch = raw.match(/(?:кажд(?:ые|ий|ую)?|раз\s+в|не\s+чаще\s+чем\s+раз\s+в|через)\s+(\d{1,3})\s*(?:мин|минут)/i);
+  if (minuteMatch) {
+    const mins = parseInt(minuteMatch[1], 10);
+    let suggestedMax = mins <= 10 ? 12 : mins <= 30 ? 8 : mins <= 60 ? 6 : 4;
+    setGap(mins, suggestedMax);
+  }
+
+  const hourMatch = raw.match(/(?:кажд(?:ые|ий|ую)?|раз\s+в|не\s+чаще\s+чем\s+раз\s+в|через)\s+(\d{1,2})\s*(?:ч|час|часа|часов)/i);
+  if (hourMatch) {
+    const h = parseInt(hourMatch[1], 10);
+    setGap(h * 60, h <= 1 ? 6 : h == 2 ? 4 : 3);
+  }
+
+  if (!touched && /раз\s+в\s+час|кажд(?:ый|ые)?\s+час|почас/i.test(raw)) setGap(60, 6);
+  if (!touched && !/(^|\s)не\s+чаще/i.test(raw) && (/(пиши|писать).*чаще/i.test(raw) || /чаще/i.test(raw))) {
+    const cur = Number(current.min_gap_minutes || DEFAULT_PROACTIVE.min_gap_minutes);
+    const next = cur > 60 ? 60 : cur > 30 ? 30 : 10;
+    setGap(next, next <= 10 ? 12 : next <= 30 ? 8 : 6);
+  }
+  if (!touched && /(пиши|писать).*реже|реже/i.test(raw)) {
+    const cur = Number(current.min_gap_minutes || DEFAULT_PROACTIVE.min_gap_minutes);
+    const next = cur < 60 ? 60 : cur < 120 ? 120 : cur < 180 ? 180 : 360;
+    setGap(next, next >= 360 ? 2 : next >= 180 ? 3 : 4);
+  }
+
+  const maxDayMatch = raw.match(/(?:не\s+чаще|максимум|до|лимит)\s+(\d{1,2})\s*(?:раз(?:а)?\s+)?(?:в\s+)?(?:день|сутки)/i)
+    || raw.match(/(\d{1,2})\s*раз(?:а)?\s+в\s+(?:день|сутки)/i);
+  if (maxDayMatch) {
+    cfg.max_per_day = clamp(parseInt(maxDayMatch[1], 10), 1, 48);
+    touched = true;
+  }
+
+  if (/только\s+важн|важное|important/i.test(raw)) { cfg.mode = "important_only"; touched = true; }
+  if (/только\s+критич|критич/i.test(raw)) { cfg.mode = "critical_only"; touched = true; }
+  if (/свободнее|обычн(?:ый|ом)?\s+режим|можешь\s+писать\s+свободнее/i.test(raw)) { cfg.mode = "normal"; touched = true; }
+
+  if (/включ/i.test(raw) && /самостоятельн|сообщени|пиши/i.test(raw)) { cfg.enabled = true; touched = true; }
+  if (/выключ|отключ|(^|\s)не\s+пиши/i.test(raw) && /самостоятельн|сообщени|сама|сам/i.test(raw)) { cfg.enabled = false; touched = true; }
+  if (touched && cfg.enabled !== false && /пиши|писать|сообщени|самостоятельн/i.test(raw) && !/(^|\s)не\s+пиши|выключ|отключ/i.test(raw)) cfg.enabled = true;
+
+  return touched ? cfg : null;
+}
+
+function applyProactiveConfig(state, cfg) {
+  if (!cfg) return false;
+  state.proactive = { ...DEFAULT_PROACTIVE, ...(state.proactive || {}) };
+  if (typeof cfg.enabled === "boolean") state.proactive.enabled = cfg.enabled;
+  if (cfg.mode) state.proactive.mode = String(cfg.mode);
+  if (cfg.min_gap_minutes) state.proactive.min_gap_minutes = clamp(cfg.min_gap_minutes, 10, 1440);
+  if (cfg.max_per_day) state.proactive.max_per_day = clamp(cfg.max_per_day, 1, 48);
+  state.proactive.configured_at = now();
+  return true;
+}
+
+function proactiveConfigSummary(state) {
+  const p = state.proactive || DEFAULT_PROACTIVE;
+  const stateTxt = p.enabled ? "включены" : "выключены";
+  let mode = p.mode === "critical_only" ? "только критичное" : p.mode === "normal" ? "обычный" : "только важное";
+  return `Самостоятельные сообщения: ${stateTxt}; режим: ${mode}; пауза: ${pluralHours(p.min_gap_minutes || 180)}; лимит: ${p.max_per_day || 3} в день.`;
 }
 
 function executeOp(state, op, arg) {
@@ -336,11 +427,7 @@ function executeOp(state, op, arg) {
   }
 
   if (op === "proactive.configure") {
-    if (/час/i.test(a)) state.proactive.min_gap_minutes = 60;
-    if (/2|два|две/i.test(a) && /час/i.test(a)) state.proactive.min_gap_minutes = 120;
-    if (/3|три/i.test(a) && /час/i.test(a)) state.proactive.min_gap_minutes = 180;
-    if (/важн/i.test(a)) state.proactive.mode = "important_only";
-    if (/част/i.test(a)) state.proactive.min_gap_minutes = Math.min(state.proactive.min_gap_minutes || 180, 60);
+    applyProactiveConfig(state, proactiveConfigFromText(a, state.proactive));
     return null;
   }
 
@@ -432,10 +519,19 @@ async function handle(env, c, chatId, userText, userId = "") {
 
   const low = userText.toLowerCase().trim();
 
+  const directProactiveConfig = proactiveConfigFromText(low, state.proactive);
+  if (directProactiveConfig) {
+    applyProactiveConfig(state, directProactiveConfig);
+    state.dialogue.push({ role: "bot", text: proactiveConfigSummary(state).slice(0, 500), t: now() });
+    await saveState(env, state);
+    await send(c, chatId, "Готово. " + proactiveConfigSummary(state));
+    return;
+  }
+
   if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
     const p = state.proactive;
-    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин.)`);
+    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин., ${p.sent_count || 0}/${p.max_per_day || 3} сегодня)`);
     await saveState(env, state); return;
   }
 
