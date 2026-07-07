@@ -6,7 +6,7 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.3.1-thinking-core-hotfix-2026-07-07";
+const VERSION = "jarvis-core-v1.3.2-memory-trust-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
 const MEMORY_LIMIT = 160;
@@ -49,6 +49,7 @@ const DEFAULT_THINKING = {
 
 const DEFAULT_BELIEFS = {
   facts: [],
+  rules: [],
   assumptions: [],
   unknowns: []
 };
@@ -94,18 +95,26 @@ async function loadState(env) {
 function normalize(s) {
   s = s || {};
   s.self_model = { ...DEFAULT_SELF_MODEL, ...(s.self_model || {}) };
-  s.memory = Array.isArray(s.memory) ? s.memory.slice(-MEMORY_LIMIT) : [];
+  s.memory = normalizeMemoryEntries(Array.isArray(s.memory) ? s.memory : []).slice(-MEMORY_LIMIT);
   s.tasks = Array.isArray(s.tasks) ? s.tasks.slice(-TASK_LIMIT) : [];
   s.dialogue = Array.isArray(s.dialogue) ? s.dialogue.slice(-DIALOGUE_LIMIT) : [];
-  s.mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice(-80) : [];
+  s.mistakes = normalizeMistakes(Array.isArray(s.mistakes) ? s.mistakes : []).slice(-80);
   s.open_questions = Array.isArray(s.open_questions) ? s.open_questions.slice(-30) : [];
   s.proactive = { ...DEFAULT_PROACTIVE, ...(s.proactive || {}) };
   s.thinking = { ...DEFAULT_THINKING, ...(s.thinking || {}) };
   s.goals = Array.isArray(s.goals) ? s.goals.slice(-GOAL_LIMIT) : [];
   s.beliefs = { ...DEFAULT_BELIEFS, ...(s.beliefs || {}) };
-  s.beliefs.facts = Array.isArray(s.beliefs.facts) ? s.beliefs.facts.slice(-BELIEF_LIMIT) : [];
-  s.beliefs.assumptions = Array.isArray(s.beliefs.assumptions) ? s.beliefs.assumptions.slice(-BELIEF_LIMIT) : [];
-  s.beliefs.unknowns = Array.isArray(s.beliefs.unknowns) ? s.beliefs.unknowns.slice(-BELIEF_LIMIT) : [];
+  s.beliefs.facts = normalizeBeliefEntries(Array.isArray(s.beliefs.facts) ? s.beliefs.facts : [], "facts").slice(-BELIEF_LIMIT);
+  s.beliefs.rules = normalizeBeliefEntries(Array.isArray(s.beliefs.rules) ? s.beliefs.rules : [], "rules").slice(-BELIEF_LIMIT);
+  s.beliefs.assumptions = normalizeBeliefEntries(Array.isArray(s.beliefs.assumptions) ? s.beliefs.assumptions : [], "assumptions").slice(-BELIEF_LIMIT);
+  s.beliefs.unknowns = normalizeBeliefEntries(Array.isArray(s.beliefs.unknowns) ? s.beliefs.unknowns : [], "unknowns").slice(-BELIEF_LIMIT);
+  // Миграция старых записей: правила могли раньше попасть в facts, а facts могли быть только в memory.
+  for (const m of s.memory) {
+    const txt = m.text || m.lesson || "";
+    if (isMemoryRule(txt)) addBelief(s, "rules", txt, m.score || 85, "memory_migration");
+    else addBelief(s, "facts", txt, m.score || 70, "memory_migration");
+  }
+  s.beliefs.facts = s.beliefs.facts.filter(x => !isMemoryRule(x.text || x)).slice(-BELIEF_LIMIT);
   s.decision_log = Array.isArray(s.decision_log) ? s.decision_log.slice(-DECISION_LOG_LIMIT) : [];
   s.ownerChatId = s.ownerChatId || "";
   s.ownerUserId = s.ownerUserId || "";
@@ -159,6 +168,102 @@ function parseJsonLoose(t) {
   const a = String(t || "").indexOf("{"), b = String(t || "").lastIndexOf("}");
   if (a >= 0 && b > a) { try { return JSON.parse(String(t).slice(a, b + 1)); } catch {} }
   return null;
+}
+
+
+// ============================================================ MEMORY TRUST v1.1
+function stripMemoryShell(text) {
+  let s = String(text || "").trim().replace(/\s+/g, " ");
+  const isQ = ch => /["'«»“”]/.test(ch || "");
+  if (s.length >= 2 && isQ(s[0]) && isQ(s[s.length - 1])) s = s.slice(1, -1).trim();
+  else if (isQ(s[0])) s = s.slice(1).trim();
+  return s.replace(/[.。]+$/, "").trim();
+}
+
+function isMemoryRule(text) {
+  return /^(правило|установка|принцип)\b/i.test(stripMemoryShell(text)) || /памят.*должн.*честн/i.test(stripMemoryShell(text));
+}
+
+function normalizeMemoryFact(text) {
+  let a = stripMemoryShell(text);
+  let m = a.match(/^мой\s+главн\S*\s+проект\s+(?:сейчас\s+)?[:—-]?\s*(.+)$/i);
+  if (m) return "главный проект Сергея: " + stripMemoryShell(m[1]).slice(0, 240);
+  m = a.match(/^главн\S*\s+проект\s+сергея\s*(?:сейчас\s*)?[:—-]?\s*(.+)$/i);
+  if (m) return "главный проект Сергея: " + stripMemoryShell(m[1]).slice(0, 240);
+  m = a.match(/^мой\s+проект\s+(?:сейчас\s+)?[:—-]?\s*(.+)$/i);
+  if (m) return "проект Сергея: " + stripMemoryShell(m[1]).slice(0, 240);
+  m = a.match(/^у\s+меня\s+(.+)$/i);
+  if (m) return "у Сергея " + stripMemoryShell(m[1]).slice(0, 300);
+  m = a.match(/^мне\s+(.+)$/i);
+  if (m) return "Сергею " + stripMemoryShell(m[1]).slice(0, 300);
+  m = a.match(/^я\s+хочу\s+(.+)$/i);
+  if (m) return "Сергей хочет " + stripMemoryShell(m[1]).slice(0, 300);
+  m = a.match(/^я\s+люблю\s+(.+)$/i);
+  if (m) return "Сергей любит " + stripMemoryShell(m[1]).slice(0, 300);
+  m = a.match(/^меня\s+зовут\s+(.+)$/i);
+  if (m) return "Сергея зовут " + stripMemoryShell(m[1]).slice(0, 120);
+  return a;
+}
+
+function memoryKey(text) {
+  return normalizeMemoryFact(text)
+    .toLowerCase()
+    .replace(/ё/g, "е")
+    .replace(/\b(сейчас|теперь|именно|это)\b/gi, "")
+    .replace(/[^a-zа-я0-9]+/gi, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function normalizeMemoryEntries(entries) {
+  const out = [];
+  const seen = new Set();
+  for (const item of entries) {
+    const src = item && typeof item === "object" ? item : { text: item };
+    const text = normalizeMemoryFact(src.text || src.lesson || "");
+    if (!text || /пароль|токен|token|secret|sk-/i.test(text)) continue;
+    const key = memoryKey(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...src, text, score: Number(src.score || 70) || 70, t: src.t || now() });
+  }
+  return out;
+}
+
+function normalizeBeliefEntries(entries, kind = "facts") {
+  const out = [];
+  const seen = new Set();
+  for (const item of entries) {
+    const src = item && typeof item === "object" ? item : { text: item };
+    let text = normalizeMemoryFact(src.text || "");
+    if (!text) continue;
+    if (kind === "facts" && isMemoryRule(text)) continue;
+    const key = memoryKey(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...src, text, confidence: Math.max(0, Math.min(100, Number(src.confidence || src.score || 70) || 70)), source: src.source || "normalized", t: src.t || now() });
+  }
+  return out;
+}
+
+function normalizeMistakes(entries) {
+  const out = [];
+  const seen = new Set();
+  for (const item of entries) {
+    const src = item && typeof item === "object" ? item : { what: item };
+    const text = shortText(src.what || src.lesson || "", 220);
+    if (!text) continue;
+    const key = normalizeForCompare(text);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...src, what: text, when: src.when || src.t || now() });
+  }
+  return out;
+}
+
+function memoryListLines(items, empty = "нет") {
+  const arr = Array.isArray(items) ? items : [];
+  return arr.length ? arr.map((x, i) => `${i + 1}. ${x.text || x.lesson || x}`).join("\n") : empty;
 }
 
 // ============================================================ MEMORY RECALL
@@ -225,11 +330,11 @@ function ensureGoal(state, title, priority = 70, nextStep = "") {
 }
 
 function addBelief(state, kind, text, confidence = 70, source = "system") {
-  const k = ["facts", "assumptions", "unknowns"].includes(kind) ? kind : "assumptions";
-  const a = shortText(text, 260);
+  const k = ["facts", "rules", "assumptions", "unknowns"].includes(kind) ? kind : "assumptions";
+  const a = normalizeMemoryFact(shortText(text, 260));
   if (!a) return false;
   const arr = state.beliefs[k];
-  if (!arr.some(x => similarity(x.text || x, a) > 0.82)) {
+  if (!arr.some(x => memoryKey(x.text || x) === memoryKey(a) || similarity(x.text || x, a) > 0.82)) {
     arr.push({ text: a, confidence, source, t: now() });
     state.beliefs[k] = arr.slice(-BELIEF_LIMIT);
     return true;
@@ -345,16 +450,23 @@ function thinkingReport(state) {
     "Активные цели:",
     goals.length ? goals.map((g, i) => `${i + 1}. ${g.title}${g.next_step ? " → " + g.next_step : ""}`).join("\n") : "нет",
     "",
-    "Что считаю фактами:",
-    b.facts.length ? b.facts.slice(-5).map((x, i) => `${i + 1}. ${x.text || x}`).join("\n") : "пока мало",
+    "Точно помню:",
+    memoryListLines((b.facts || []).slice(-7), "пока мало"),
     "",
-    "Что не знаю точно:",
-    b.unknowns.length ? b.unknowns.slice(-5).map((x, i) => `${i + 1}. ${x.text || x}`).join("\n") : "нет",
+    "Правила:",
+    memoryListLines((b.rules || []).slice(-5), "нет"),
+    "",
+    "Предполагаю:",
+    memoryListLines((b.assumptions || []).slice(-5), "нет"),
+    "",
+    "Не знаю точно:",
+    memoryListLines((b.unknowns || []).slice(-5), "нет"),
     "",
     "Последние решения:",
     last.length ? last.map((x, i) => `${i + 1}. ${x.intent}: ${x.decision || x.goal}`).join("\n") : "нет"
   ].join("\n");
 }
+
 
 // ============================================================ REAL CONTEXT
 function buildContext(state, eventText, opts = {}) {
@@ -377,6 +489,8 @@ function buildContext(state, eventText, opts = {}) {
   if (mem.length) lines.push("- релевантная память: " + mem.map(m => m.text || m.lesson).join("; "));
   if (state.goals.length) lines.push("- активные цели: " + activeGoals(state).map(g => g.title + (g.next_step ? " → " + g.next_step : "")).join("; "));
   if (state.beliefs.facts.length) lines.push("- точно помню/считаю фактом: " + state.beliefs.facts.slice(-4).map(x => x.text || x).join("; "));
+  if (state.beliefs.rules?.length) lines.push("- правила памяти/поведения: " + state.beliefs.rules.slice(-4).map(x => x.text || x).join("; "));
+  if (state.beliefs.assumptions.length) lines.push("- предполагаю: " + state.beliefs.assumptions.slice(-4).map(x => x.text || x).join("; "));
   if (state.beliefs.unknowns.length) lines.push("- не знаю точно/надо проверить: " + state.beliefs.unknowns.slice(-4).map(x => x.text || x).join("; "));
   if (recentMistakes.length) lines.push("- мои ошибки/уроки, не повторять: " + recentMistakes.map(m => m.what || m.lesson).join("; "));
   if (state.open_questions.length) lines.push("- открытые вопросы: " + state.open_questions.slice(-4).map(q => q.q || q.text || q).join("; "));
@@ -491,10 +605,11 @@ const ALLOWED_OPS = new Set([
 ]);
 
 function addMemory(state, text, score = 70) {
-  const a = String(text || "").slice(0, 400).trim();
+  const a = normalizeMemoryFact(String(text || "").slice(0, 400));
   if (!a || /пароль|токен|token|secret|sk-/i.test(a)) return false;
-  if (!state.memory.some(m => similarity(m.text || m.lesson, a) > 0.8)) {
+  if (!state.memory.some(m => memoryKey(m.text || m.lesson) === memoryKey(a) || similarity(m.text || m.lesson, a) > 0.8)) {
     state.memory.push({ text: a, score, t: now() });
+    state.memory = normalizeMemoryEntries(state.memory).slice(-MEMORY_LIMIT);
     return true;
   }
   return false;
@@ -517,22 +632,14 @@ function extractMemoryCommand(text) {
   return shortText(m[1], 380);
 }
 
-function normalizeMemoryFact(text) {
-  let a = shortText(text, 380).replace(/[.。]+$/, "").trim();
-  let m = a.match(/^мой\s+главн\w*\s+проект\s+(?:сейчас\s+)?[:—-]?\s*(.+)$/i);
-  if (m) return "главный проект Сергея: " + shortText(m[1], 240);
-  m = a.match(/^меня\s+зовут\s+(.+)$/i);
-  if (m) return "Сергея зовут " + shortText(m[1], 120);
-  return a;
-}
-
 function executeOp(state, op, arg) {
   if (!ALLOWED_OPS.has(op)) return null;
   const a = String(arg || "").slice(0, 500).trim();
   if (op === "none") return null;
 
   if (op === "memory.write") {
-    if (addMemory(state, a, 75)) addBelief(state, "facts", a, 75, "memory.write");
+    const fact = normalizeMemoryFact(a);
+    if (addMemory(state, fact, 75)) addBelief(state, isMemoryRule(fact) ? "rules" : "facts", fact, 75, "memory.write");
     return null;
   }
 
@@ -541,7 +648,8 @@ function executeOp(state, op, arg) {
       if (/скайнет/i.test(a)) state.self_model.name = "Скайнет";
       if (/джарвис/i.test(a)) state.self_model.role = "личный Джарвис Сергея";
       if (/умн|развив|самостоят|сверх/i.test(a)) state.self_model.goal = "становиться умнее, полезнее и самостоятельнее для Сергея";
-      if (addMemory(state, a, 95)) addBelief(state, "facts", a, 90, "self.update");
+      const fact = normalizeMemoryFact(a);
+      if (addMemory(state, fact, 95)) addBelief(state, isMemoryRule(fact) ? "rules" : "facts", fact, 90, "self.update");
     }
     return null;
   }
@@ -657,18 +765,31 @@ async function proactiveTick(env) {
 }
 
 // ============================================================ MAIN HANDLER
-function memoryReport(state) {
+function memoryReport(state, showAll = false) {
   const open = state.tasks.filter(t => t.status !== "done");
-  const mem = state.memory.slice(-10);
   const mistakes = state.mistakes.slice(-5);
   const p = state.proactive;
+  const b = state.beliefs || DEFAULT_BELIEFS;
+  const raw = showAll ? state.memory : state.memory.slice(-12);
   return [
     `Я: ${state.self_model.name} — ${state.self_model.role}.`,
     `Цель: ${state.self_model.goal}.`,
     `Стиль: ${state.self_model.style}.`,
     "",
-    "Память о тебе:",
-    mem.length ? mem.map((m, i) => `${i + 1}. ${m.text || m.lesson}`).join("\n") : "пока пусто",
+    "Память / точно помню:",
+    memoryListLines((b.facts || []).slice(showAll ? -BELIEF_LIMIT : -10), "пока пусто"),
+    "",
+    "Правила:",
+    memoryListLines((b.rules || []).slice(showAll ? -BELIEF_LIMIT : -8), "нет"),
+    "",
+    "Предполагаю:",
+    memoryListLines((b.assumptions || []).slice(showAll ? -BELIEF_LIMIT : -6), "нет"),
+    "",
+    "Не знаю точно:",
+    memoryListLines((b.unknowns || []).slice(showAll ? -BELIEF_LIMIT : -6), "нет"),
+    "",
+    showAll ? "Сырые записи памяти:" : "Сырые записи памяти / последние:",
+    memoryListLines(raw, "нет"),
     "",
     "Открытые задачи:",
     open.length ? open.map((t, i) => `${i + 1}. ${t.title}`).join("\n") : "нет",
@@ -682,6 +803,7 @@ function memoryReport(state) {
   ].join("\n");
 }
 
+
 async function handle(env, c, chatId, userText, userId = "") {
   const state = await loadState(env);
   state.ownerChatId = String(chatId || state.ownerChatId || "");
@@ -694,7 +816,7 @@ async function handle(env, c, chatId, userText, userId = "") {
   if (explicitMemory) {
     const fact = normalizeMemoryFact(explicitMemory);
     const added = addMemory(state, fact, 90);
-    if (added) addBelief(state, "facts", fact, 90, "explicit_memory");
+    if (added) addBelief(state, isMemoryRule(fact) ? "rules" : "facts", fact, 90, "explicit_memory");
     const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
     rememberDecision(state, userText, {
       op: "memory.write",
@@ -719,7 +841,7 @@ async function handle(env, c, chatId, userText, userId = "") {
     ensureGoal(state, title, 95, next);
     const rule = "Правило памяти: память должна быть честной — разделять точные факты, предположения и неизвестность.";
     const added = addMemory(state, rule, 95);
-    if (added) addBelief(state, "facts", rule, 95, "memory_rule");
+    if (added) addBelief(state, "rules", rule, 95, "memory_rule");
     const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
     rememberDecision(state, userText, {
       op: "task.add",
@@ -751,7 +873,7 @@ async function handle(env, c, chatId, userText, userId = "") {
   }
 
   if (/покажи память|что ты помнишь|все записи|покажи все записи/.test(low)) {
-    await send(c, chatId, memoryReport(state));
+    await send(c, chatId, memoryReport(state, /все записи|покажи все записи/i.test(low)));
     await saveState(env, state); return;
   }
 
