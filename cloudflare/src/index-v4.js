@@ -6,7 +6,7 @@
 // Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
 // просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1.3-thinking-core-2026-07-07";
+const VERSION = "jarvis-core-v1.3.1-thinking-core-hotfix-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
 const MEMORY_LIMIT = 160;
@@ -463,7 +463,7 @@ async function runBrain(env, c, state, eventText, opts = {}) {
   if (!out.reply && !allowSilent) out.reply = "Слушаю.";
 
   if (out.reply && isLooping(state.dialogue, out.reply)) {
-    state.mistakes.push({ what: "зациклился, повторял ответ", when: now() });
+    addMistake(state, "зациклился, повторял ответ");
     if (allowSilent) return { mode: "silent", reply: "", op: "none", arg: "", thought: out.thought };
     const retry = await ask(c,
       SYSTEM + "\n\nВНИМАНИЕ: ты почти повторил прошлый ответ. Ответь иначе, короче и по делу.",
@@ -472,8 +472,14 @@ async function runBrain(env, c, state, eventText, opts = {}) {
     );
     const retryOut = parseJsonLoose(retry.text) || { reply: retry.text };
     if (retryOut.reply && !isLooping(state.dialogue, retryOut.reply)) out.reply = String(retryOut.reply).trim();
-    else out.reply = "Поймал себя на повторе. Скажу проще: я на месте, Серёга.";
-    out.op = "none";
+    else {
+      if (out.op === "memory.write") out.reply = "Запомнил.";
+      else if (out.op === "task.add") out.reply = "Принял задачу.";
+      else if (out.op === "proactive.configure") out.reply = "Настроил.";
+      else out.reply = "Принял. Повторяться не буду.";
+    }
+    // Важно: loop-detector не имеет права отменять полезную операцию.
+    out.op = out.op || "none";
   }
   return out;
 }
@@ -494,19 +500,48 @@ function addMemory(state, text, score = 70) {
   return false;
 }
 
+function addMistake(state, text) {
+  const a = shortText(text, 220);
+  if (!a) return false;
+  const recent = state.mistakes.slice(-8);
+  if (recent.some(m => similarity(m.what || m.lesson, a) > 0.9)) return false;
+  state.mistakes.push({ what: a, when: now() });
+  state.mistakes = state.mistakes.slice(-80);
+  return true;
+}
+
+function extractMemoryCommand(text) {
+  const raw = String(text || "").trim().replace(/^[\s"'«»“”]+/, "").replace(/[\s"'«»“”]+$/, "");
+  const m = raw.match(/^(?:запомни|помни|сохрани|зафиксируй)\s+(?:что\s+)?(.+)$/i);
+  if (!m) return "";
+  return shortText(m[1], 380);
+}
+
+function normalizeMemoryFact(text) {
+  let a = shortText(text, 380).replace(/[.。]+$/, "").trim();
+  let m = a.match(/^мой\s+главн\w*\s+проект\s+(?:сейчас\s+)?[:—-]?\s*(.+)$/i);
+  if (m) return "главный проект Сергея: " + shortText(m[1], 240);
+  m = a.match(/^меня\s+зовут\s+(.+)$/i);
+  if (m) return "Сергея зовут " + shortText(m[1], 120);
+  return a;
+}
+
 function executeOp(state, op, arg) {
   if (!ALLOWED_OPS.has(op)) return null;
   const a = String(arg || "").slice(0, 500).trim();
   if (op === "none") return null;
 
-  if (op === "memory.write") { addMemory(state, a, 75); return null; }
+  if (op === "memory.write") {
+    if (addMemory(state, a, 75)) addBelief(state, "facts", a, 75, "memory.write");
+    return null;
+  }
 
   if (op === "self.update") {
     if (a) {
       if (/скайнет/i.test(a)) state.self_model.name = "Скайнет";
       if (/джарвис/i.test(a)) state.self_model.role = "личный Джарвис Сергея";
       if (/умн|развив|самостоят|сверх/i.test(a)) state.self_model.goal = "становиться умнее, полезнее и самостоятельнее для Сергея";
-      addMemory(state, a, 95);
+      if (addMemory(state, a, 95)) addBelief(state, "facts", a, 90, "self.update");
     }
     return null;
   }
@@ -525,7 +560,7 @@ function executeOp(state, op, arg) {
   }
 
   if (op === "mistake.write") {
-    if (a) state.mistakes.push({ what: a, when: now() });
+    if (a) addMistake(state, a);
     return null;
   }
 
@@ -654,6 +689,54 @@ async function handle(env, c, chatId, userText, userId = "") {
   state.dialogue.push({ role: "user", text: userText.slice(0, 500), t: now() });
 
   const low = userText.toLowerCase().trim();
+
+  const explicitMemory = extractMemoryCommand(userText);
+  if (explicitMemory) {
+    const fact = normalizeMemoryFact(explicitMemory);
+    const added = addMemory(state, fact, 90);
+    if (added) addBelief(state, "facts", fact, 90, "explicit_memory");
+    const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
+    rememberDecision(state, userText, {
+      op: "memory.write",
+      arg: fact,
+      thought: {
+        situation: "Сергей прямо попросил запомнить факт",
+        goal: "сохранить факт без участия модели",
+        decision: added ? "записать в память и факты" : "не дублировать уже известный факт",
+        confidence: 96,
+        memory_use: [fact],
+        next_step: "показывать этот факт в честной памяти",
+        should_remember: true
+      }
+    }, { eventType: "user_message", situation });
+    await send(c, chatId, added ? `Запомнил: ${fact}` : `Уже помню: ${fact}`);
+    await saveState(env, state); return;
+  }
+
+  if (/следи.*памят.*честн|памят.*должн.*честн|честн.*памят/i.test(low)) {
+    const title = "Следить, чтобы память была честной";
+    const next = "разделять точные факты, предположения и неизвестность";
+    ensureGoal(state, title, 95, next);
+    const rule = "Правило памяти: память должна быть честной — разделять точные факты, предположения и неизвестность.";
+    const added = addMemory(state, rule, 95);
+    if (added) addBelief(state, "facts", rule, 95, "memory_rule");
+    const situation = thinkBeforeAct(state, userText, { eventType: "user_message" });
+    rememberDecision(state, userText, {
+      op: "task.add",
+      arg: title,
+      thought: {
+        situation: "Сергей поставил контроль честности памяти",
+        goal: "держать память grounded",
+        decision: "добавить активную цель мышления",
+        confidence: 96,
+        memory_use: [rule],
+        next_step: next,
+        should_remember: true
+      }
+    }, { eventType: "user_message", situation });
+    await send(c, chatId, "Принял. Добавил цель мышления: следить, чтобы память была честной. Теперь буду разделять: точно помню / предполагаю / не знаю точно.");
+    await saveState(env, state); return;
+  }
 
   if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
