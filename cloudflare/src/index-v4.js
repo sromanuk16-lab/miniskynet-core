@@ -1,10 +1,11 @@
-const VERSION = "v7.3.0-inner-director-2026-07-07";
+const VERSION = "v7.4.0-mistake-learning-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
 const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
-const EXPERIENCE_LIMIT = 140;
+const EXPERIENCE_LIMIT = 180;
+const MISTAKE_LIMIT = 120;
 const WORKING_TURN_LIMIT = 16;
 const PROMPT_MEMORY_LIMIT = 8;
 const PROMPT_EXPERIENCE_LIMIT = 6;
@@ -22,7 +23,8 @@ const ORDINARY_ALLOWED_OPS = new Set([
   "pending.set",
   "pending.execute",
   "pending.clear",
-  "experience.write"
+  "experience.write",
+  "mistake.write"
 ]);
 
 const DANGEROUS_WORDS = [
@@ -258,6 +260,10 @@ function defaultState() {
         mem("Разговор о развитии SKYNET — это не опасное действие. Не останавливайся фразой 'нужен отдельный режим'; объясняй следующий слой коротко.", "seed", 100),
         mem("Короткие уточнения Сергея вроде 'какой?', 'почему?', 'что дальше?' надо понимать по последней реплике и текущей теме.", "seed", 100)
       ],
+      mistakes: [
+        mem("Ошибка прошлых веток: фиксить симптомы вместо общего механизма. Урок: сначала понять причину, потом менять слой мозга.", "seed", 100),
+        mem("Ошибка v7.1.2: Fast Mind перехватил обычный вопрос и ответил не по личности. Урок: не заменять LLM-мозг локальными ускорителями.", "seed", 100)
+      ],
       notes: [],
       goals: [
         mem("Стать умным помощником Сергея: понимать, помнить, действовать, признавать ограничения и развиваться.", "seed", 100)
@@ -333,7 +339,7 @@ function normalizeState(s) {
   out.version = VERSION;
   out.identity = { ...d.identity, ...(isObj(out.identity) ? out.identity : {}) };
   out.memory = isObj(out.memory) ? out.memory : d.memory;
-  for (const k of ["about_user", "project", "decisions", "lessons", "notes", "goals"]) {
+  for (const k of ["about_user", "project", "decisions", "lessons", "mistakes", "notes", "goals"]) {
     if (!Array.isArray(out.memory[k])) out.memory[k] = d.memory[k] || [];
   }
   out.working = { ...d.working, ...(isObj(out.working) ? out.working : {}) };
@@ -390,6 +396,7 @@ function stateForPrompt(state, userText = "") {
       project: pickMemory(state.memory.project, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
       decisions: pickMemory(state.memory.decisions, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
       lessons: pickMemory(state.memory.lessons, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
+      mistakes: pickMemory(state.memory.mistakes, userText, Math.max(4, Math.floor(PROMPT_MEMORY_LIMIT / 2))).map((m) => m.text),
       goals: pickMemory(state.memory.goals, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
       notes: pickMemory(state.memory.notes, userText, Math.max(4, Math.floor(PROMPT_MEMORY_LIMIT / 2))).map((m) => m.text)
     },
@@ -772,6 +779,53 @@ function normalizeDirector(d) {
   };
 }
 
+
+function buildMistakeLearningModel(state, userText = "") {
+  const a = buildAttentionModel(state, userText);
+  const s = lower(userText);
+  const w = state?.working || {};
+  const lastAgent = clean(w.last_agent || "");
+  const explicitCorrection = a.is_quality_criticism || s.includes("не так") || s.includes("не то") || s.includes("слабо") || s.includes("бот") || s.includes("шаблон") || s.includes("технодамп") || s.includes("долго") || s.includes("вис");
+  if (!explicitCorrection) {
+    return {
+      active: false,
+      reason: "нет явной ошибки или критики",
+      should_write_mistake: false
+    };
+  }
+  return {
+    active: true,
+    reason: "Сергей указывает на ошибку/слабое поведение; нужно извлечь урок, не оправдываться.",
+    should_write_mistake: true,
+    user_signal: clean(userText),
+    last_agent_answer: lastAgent,
+    likely_failure_area: inferFailureArea(userText, state),
+    required_response: "кратко признать ошибку, назвать причину, сохранить урок и следующий общий принцип"
+  };
+}
+
+function inferFailureArea(userText, state) {
+  const s = lower(userText);
+  if (s.includes("вис") || s.includes("долго") || s.includes("медлен") || s.includes("тормоз")) return "скорость/контекст слишком тяжёлый";
+  if (s.includes("шаблон") || s.includes("бот") || s.includes("чем могу помочь")) return "ботский тон или шаблонность";
+  if (s.includes("не то") || s.includes("не так") || s.includes("опять")) return "выбран неправильный механизм или ответ не по цели";
+  if (s.includes("техно") || s.includes("скуч")) return "наружу вышли внутренние технические детали";
+  return clean(state?.working?.current_obstacle || "качество ответа");
+}
+
+function recordMistakeLearning(state, decision, msg, result) {
+  const model = buildMistakeLearningModel(state, msg?.text || "");
+  if (!model.active) return;
+  const lessonText = clean((decision.mistake_learning && (decision.mistake_learning.lesson || decision.mistake_learning.avoid_next_time)) || "");
+  if (lessonText) return;
+  const failure = model.likely_failure_area || "качество ответа";
+  const text = `Ошибка: ${failure}. Причина: ${model.reason}. Урок: не исправлять одной фразой; обновлять общий механизм поведения. Не повторять: при критике Сергея сначала признать сбой, затем назвать следующий архитектурный шаг.`;
+  if (!(state.memory.mistakes || []).some((m) => similarText(m.text, text))) {
+    state.memory.mistakes.unshift(mem(text, "auto_mistake_learning", 95));
+  }
+  state.experience.push(exp("mistake_signal", text, { user_signal: msg?.text || "", agent_answer: result?.speech || "" }));
+}
+
 function buildMessages(state, userText, msg) {
   const payload = {
     now: now(),
@@ -780,6 +834,7 @@ function buildMessages(state, userText, msg) {
     attention: buildAttentionModel(state, userText),
     situation_model: buildSituationModel(state, userText),
     director: buildInnerDirector(state, userText),
+    mistake_learning: buildMistakeLearningModel(state, userText),
     semantic_hint: buildSemanticHint(state, userText),
     state: stateForPrompt(state, userText),
     tools: TOOL_REGISTRY,
@@ -790,7 +845,8 @@ function buildMessages(state, userText, msg) {
       { op: "pending.set", fields: { label: "short human label", action: { op: "task.add|memory.write", title: "string", details: "string", kind: "string", text: "string" } } },
       { op: "pending.execute" },
       { op: "pending.clear" },
-      { op: "experience.write", fields: { event: "string", text: "lesson/observation" } }
+      { op: "experience.write", fields: { event: "string", text: "lesson/observation" } },
+      { op: "mistake.write", fields: { mistake: "what went wrong", cause: "why", lesson: "what rule changes", avoid_next_time: "short behavior rule" } }
     ],
     forbidden_ordinary_operations: [
       "deploy", "apply code", "delete", "shell", "secrets", "GitHub write", "change env", "external write"
@@ -825,16 +881,20 @@ function buildMessages(state, userText, msg) {
         mood: "agent tone"
       },
       experience_notes: ["short lessons from this turn that should affect future behavior"],
+      mistake_learning: { mistake: "optional", cause: "optional", lesson: "optional", avoid_next_time: "optional" },
       confidence: 0.0,
       technical_mode: false
     }
   };
 
   const system = [
-    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.3: Inner Director.",
+    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.4: Mistake Learning.",
     "Это не командный бот и не быстрый локальный перехватчик. Каждый обычный текст решай как один цельный агент: понять смысл, вспомнить нужное, выбрать действие, ответить коротко.",
     "Перед тобой есть attention, situation_model и director. Attention показывает главный сигнал, situation_model описывает сцену, director выбирает режим поведения: ответить, запомнить, спросить, предложить, действовать или остановить действие.",
     "Director — не шаблон ответа. Это внутренний управляющий слой. Следуй его intent/decision/priority, но формулируй живой короткий ответ сама.",
+    "v7.4 добавляет обучение на ошибках: если Сергей указывает, что ответ слабый/не тот/ботский/тупой, не оправдывайся. Назови коротко ошибку и сохрани урок через mistake.write или experience.write.",
+    "Mistake Learning — не логирование каждого сообщения. Записывай только реальные уроки: что пошло не так, причина, новое правило поведения.",
+    "Когда есть ошибка, хорошая наружная форма: 'Да. Ошибка понятна: ... Запомнила: ...' — коротко, без технодампа.",
     "Тебе уже дали компактный контекст. Не пытайся восстановить всю историю; используй только релевантное из attention, situation_model, state, working, recent_turns, pending и recent_experience.",
     "Приоритеты понимания: 1) текущая фраза Сергея, 2) director.intent/decision/priority, 3) attention.primary_signal, 4) situation_model, 5) последняя реплика агента и open_loop, 6) рабочая память, 7) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
     "Если director.decision указывает answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
@@ -856,6 +916,7 @@ function buildMessages(state, userText, msg) {
     "Если текущий вопрос 'Ты кто?' или похожий, хороший ответ: 'Я Скайнет / Лондон. Твой цифровой помощник. Пока не Джарвис, но иду туда: память, инициатива, действия и развитие.'",
     "Если Сергей спрашивает, что нужно для развития, назови следующий слой: единый мозг, менеджер контекста, память опыта, внимание, инструменты. Без длинной лекции, если он не просит подробно.",
     "В experience_notes записывай только полезные уроки из текущего поворота, не лог всего подряд.",
+    "Если пишешь mistake.write: mistake — факт ошибки, cause — причина, lesson — чему научилась, avoid_next_time — короткое правило на будущее.",
     "Никогда не возвращай обычным текстом слово unknown.",
     "Верни только валидный JSON. Без markdown. Без пояснений вне JSON."
   ].join("\n");
@@ -920,12 +981,13 @@ function normalizeDecision(d) {
     director: isObj(x.director) ? normalizeDirector(x.director) : {},
     working: isObj(x.working) ? x.working : {},
     experience_notes: Array.isArray(x.experience_notes) ? x.experience_notes.map(clean).filter(Boolean).slice(0, 5) : [],
+    mistake_learning: isObj(x.mistake_learning) ? x.mistake_learning : {},
     confidence: Number(x.confidence || 0),
     technical_mode: Boolean(x.technical_mode)
   };
 }
 
-// v7.3: no local Fast Mind for ordinary text. One Brain decides, guided by Attention, Situation Model and Inner Director.
+// v7.4: no local Fast Mind for ordinary text. One Brain decides, guided by Attention/Situation/Director and learns from mistakes.
 
 function isClearAcceptance(s) {
   const t = lower(s).replace(/[.!?]+$/g, "").trim();
@@ -969,14 +1031,15 @@ function isDevelopmentContext(state, text = "") {
   return DEVELOPMENT_CONVERSATION_HINTS.some((h) => context.includes(h)) || context.includes("стала умнее") || context.includes("сделать тебя умнее") || context.includes("доросла");
 }
 
-// v7.3 keeps one LLM brain; Director is a control signal, not a local speech template.
+// v7.4 keeps one LLM brain; Director is a control signal, Mistake Learning updates behavior rules.
 
 async function runAgent(env, c, msg) {
   const state = await loadState(env);
   const decision = await askBrain(c, state, msg);
   const result = await applyDecision(state, decision, msg);
+  recordMistakeLearning(state, decision, msg, result);
   updateWorking(state, decision, msg, result.speech);
-  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: "one_brain_inner_director", attention: buildAttentionModel(state, msg.text).primary_signal }));
+  state.experience.push(exp("turn", `user: ${clip(msg.text, 260)} | agent: ${clip(result.speech, 260)}`, { confidence: decision.confidence, path: "one_brain_mistake_learning", attention: buildAttentionModel(state, msg.text).primary_signal }));
   await saveState(env, state);
   return result.speech;
 }
@@ -999,6 +1062,13 @@ async function applyDecision(state, decision, msg) {
     if (r?.event) events.push(r.event);
     if (r?.speech_hint && !speech) speech = r.speech_hint;
     if (op.op === "pending.execute") pendingExecuted = true;
+  }
+
+  if (isObj(decision.mistake_learning) && Object.keys(decision.mistake_learning).length) {
+    const m = decision.mistake_learning;
+    if (validHumanText(m.mistake || m.lesson || m.avoid_next_time || "")) {
+      opMistakeWrite(state, { op: "mistake.write", mistake: m.mistake, cause: m.cause, lesson: m.lesson, avoid_next_time: m.avoid_next_time });
+    }
   }
 
   for (const note of decision.experience_notes || []) {
@@ -1061,6 +1131,8 @@ function executeOp(state, op, msg) {
     case "experience.write":
       state.experience.push(exp(clean(op.event || "lesson"), clean(op.text || op.note || "")));
       return { event: { type: "experience_write" } };
+    case "mistake.write":
+      return opMistakeWrite(state, op);
     default:
       return { event: { type: "ignored", op: op.op } };
   }
@@ -1071,7 +1143,8 @@ function bucketForKind(kind) {
   if (["user", "about_user", "preference", "preferences"].includes(k)) return "about_user";
   if (["project", "projects"].includes(k)) return "project";
   if (["decision", "decisions", "rule", "rules"].includes(k)) return "decisions";
-  if (["lesson", "lessons", "mistake", "mistakes"].includes(k)) return "lessons";
+  if (["mistake", "mistakes", "failure", "failures", "error", "errors"].includes(k)) return "mistakes";
+  if (["lesson", "lessons"].includes(k)) return "lessons";
   if (["goal", "goals", "identity_goal"].includes(k)) return "goals";
   return "notes";
 }
@@ -1084,6 +1157,33 @@ function opMemoryWrite(state, op) {
   if (!exists) state.memory[bucket].unshift(mem(text, "brain", op.importance || 75));
   if (bucket === "goals" && text.length > 8) state.identity.main_goal = text;
   return { event: { type: "memory_write", bucket }, speech_hint: bucket === "goals" ? "Приняла. Это моя главная цель." : "Запомнила." };
+}
+
+
+function opMistakeWrite(state, op) {
+  const mistake = clean(op.mistake || op.error || op.what || "");
+  const cause = clean(op.cause || op.why || "");
+  const lesson = clean(op.lesson || op.rule || op.text || "");
+  const avoid = clean(op.avoid_next_time || op.avoid || op.future_rule || "");
+  const parts = [];
+  if (mistake) parts.push(`Ошибка: ${mistake}`);
+  if (cause) parts.push(`Причина: ${cause}`);
+  if (lesson) parts.push(`Урок: ${lesson}`);
+  if (avoid) parts.push(`Не повторять: ${avoid}`);
+  const text = clean(parts.join(". "));
+  if (!validHumanText(text)) return { event: { type: "mistake_skip" } };
+  const exists = (state.memory.mistakes || []).some((m) => similarText(m.text, text));
+  if (!exists) state.memory.mistakes.unshift(mem(text, "mistake_learning", 100));
+  state.experience.push(exp("mistake_learned", text, { mistake, cause, lesson, avoid_next_time: avoid }));
+  return { event: { type: "mistake_write" }, speech_hint: "Запомнила ошибку." };
+}
+
+function similarText(a, b) {
+  const x = lower(a).replace(/[^a-zа-я0-9]+/gi, " ").trim();
+  const y = lower(b).replace(/[^a-zа-я0-9]+/gi, " ").trim();
+  if (!x || !y) return false;
+  if (x === y) return true;
+  return x.includes(y.slice(0, 80)) || y.includes(x.slice(0, 80));
 }
 
 function opTaskAdd(state, op) {
@@ -1347,6 +1447,8 @@ function memoryBrief(state) {
   lines.push(`Ожидание: ${state.pending ? state.pending.label : "нет"}`);
   const lesson = state.memory.lessons?.[0]?.text;
   if (lesson) lines.push(`Урок: ${lesson}`);
+  const mistake = state.memory.mistakes?.[0]?.text;
+  if (mistake) lines.push(`Ошибка/урок: ${mistake}`);
   const expLast = state.experience?.slice(-1)?.[0]?.text;
   if (expLast) lines.push(`Опыт: ${expLast}`);
   return lines.join("\n");
@@ -1412,6 +1514,13 @@ function directorBrief(state) {
   ].join("\n");
 }
 
+
+function mistakesBrief(state) {
+  const xs = Array.isArray(state.memory?.mistakes) ? state.memory.mistakes.slice(0, 12) : [];
+  if (!xs.length) return "Ошибок ещё не накоплено.";
+  return xs.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
+}
+
 function taskListText(state) {
   const active = activeTasks(state);
   if (!active.length) return "Активных задач нет.";
@@ -1427,7 +1536,7 @@ async function handleCommand(env, c, msg) {
     return [
       "Я на месте, Серёга.",
       "Пиши обычным текстом.",
-      "Команды: /status, /memory, /working, /attention, /situation, /director, /experience, /tasks, /pending, /selftest."
+      "Команды: /status, /memory, /working, /attention, /situation, /director, /experience, /mistakes, /tasks, /pending, /selftest."
     ].join("\n");
   }
 
@@ -1445,6 +1554,7 @@ async function handleCommand(env, c, msg) {
       `Директор: ${state.working.director?.decision || "нет"}`,
       `Ситуация: ${state.working.situation_model?.scene || state.working.situation || "нет"}`,
       `Опыт: ${(state.experience || []).length} записей`,
+      `Ошибок: ${(state.memory.mistakes || []).length} уроков`,
       `Активных задач: ${activeTasks(state).length}`,
       `Ожидание: ${state.pending ? state.pending.label : "нет"}`
     ].join("\n");
@@ -1456,6 +1566,7 @@ async function handleCommand(env, c, msg) {
   if (cmd === "/situation") return situationBrief(state);
   if (cmd === "/director") return directorBrief(state);
   if (cmd === "/experience") return experienceBrief(state);
+  if (cmd === "/mistakes") return mistakesBrief(state);
   if (cmd === "/tasks") return taskListText(state);
   if (cmd === "/pending") return state.pending ? `Жду: ${state.pending.label}` : "Ожиданий нет.";
 
@@ -1516,6 +1627,7 @@ function selfTestText(env, c, state) {
     ["attention model", "active"],
     ["situation model", "active"],
     ["inner director", "active"],
+    ["mistake learning", "active"],
     ["fast mind", "disabled for ordinary text"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
@@ -1530,12 +1642,13 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory; attention/situation/director guide behavior",
+    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory; attention/situation/director/mistake-learning guide behavior",
     fast_mind: false,
     context_manager: true,
     attention_model: true,
     situation_model: true,
     inner_director: true,
+    mistake_learning: true,
     dialogue_continuity: true,
     development_mode: true,
     working_memory: true,
@@ -1595,7 +1708,7 @@ export default {
   },
 
   async scheduled(event, env, ctx) {
-    // v7 deliberately does not do background work yet. The brain can propose it, but not pretend it exists.
+    // v7.4 deliberately does not do background work yet. The brain can propose it, but not pretend it exists.
     console.log(`SKYNET scheduled noop ${VERSION}`, event?.cron || "manual");
   }
 };
