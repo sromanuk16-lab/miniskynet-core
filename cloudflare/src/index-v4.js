@@ -1,30 +1,45 @@
-// MiniSkynet — Здоровое ядро (Слой 1). Собрано с нуля 2026-07-07.
-// ФИЛОСОФИЯ: интеллект = связь с реальностью, а не количество слоёв.
-// Заменяет v7.4.0 (1714 строк, 94 функции, ЗАКЛИНИЛ на "нет") на ядро,
-// которое НЕ зацикливается, потому что каждый ход сверяется с реальностью:
-//   - думает о реальных задачах, не о "развитии саморазвития"
-//   - помнит реальные факты о владельце
-//   - ловит собственное зацикливание и разрывает его
-//   - учится на реальных поправках владельца
-//   - НЕ ставит себе абстрактных самопридуманных целей
-//
-// Слой 2 (руки/самопатчинг) ставится ПОВЕРХ, когда это ядро обкатано.
+// MiniSkynet / Jarvis Core v1.2 — Proactive Pulse. 2026-07-07.
+// ФИЛОСОФИЯ: один мозг, одна память, два входа:
+//   1) Сергей пишет в Telegram
+//   2) Скайнет сама просыпается по scheduled tick
+// Оба входа идут через один и тот же runBrain(), тот же SYSTEM, тот же state.
+// Никакого отдельного "proactive brain". Самостоятельные сообщения — это тот же Скайнет,
+// просто событие не user_message, а scheduled_tick.
 
-const VERSION = "jarvis-core-v1-2026-07-07";
+const VERSION = "jarvis-core-v1.2-proactive-pulse-2026-07-07";
 const H = { "content-type": "application/json; charset=utf-8" };
 
-// ── лимиты (взяты из v7, разумные) ──
 const MEMORY_LIMIT = 160;
 const TASK_LIMIT = 160;
-const DIALOGUE_LIMIT = 20;        // последние реплики для контекста
-const PROMPT_MEMORY_LIMIT = 6;
-const PROMPT_DIALOGUE_LIMIT = 8;
-const LOOP_WINDOW = 3;            // сколько последних ответов бота проверять на повтор
+const DIALOGUE_LIMIT = 24;
+const PROMPT_MEMORY_LIMIT = 7;
+const PROMPT_DIALOGUE_LIMIT = 10;
+const LOOP_WINDOW = 3;
 const MAX_TG = 3900;
 
+const DEFAULT_SELF_MODEL = {
+  name: "Скайнет",
+  role: "личный Джарвис Сергея",
+  goal: "становиться умнее, полезнее и самостоятельнее для Сергея",
+  style: "живой русский, коротко по простому, с характером, без ботских хвостов"
+};
+
+const DEFAULT_PROACTIVE = {
+  enabled: false,
+  mode: "important_only",
+  min_gap_minutes: 180,
+  max_per_day: 3,
+  last_sent_at: "",
+  sent_day: "",
+  sent_count: 0
+};
+
 // ============================================================ CONFIG
-const CFG_KEYS = ["TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_ID", "OWNER_ID",
-  "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_MODEL_CHEAP", "WORKER_URL"];
+const CFG_KEYS = [
+  "TELEGRAM_BOT_TOKEN", "TELEGRAM_ALLOWED_USER_ID", "OWNER_ID",
+  "TELEGRAM_CHAT_ID", "TELEGRAM_OWNER_CHAT_ID",
+  "OPENROUTER_API_KEY", "OPENROUTER_MODEL", "OPENROUTER_MODEL_CHEAP", "WORKER_URL"
+];
 
 async function cfg(env) {
   const c = {};
@@ -38,6 +53,7 @@ async function cfg(env) {
     kv: env.MINISKYNET_KV,
     telegram: c.TELEGRAM_BOT_TOKEN,
     owner: c.TELEGRAM_ALLOWED_USER_ID || c.OWNER_ID,
+    chatId: c.TELEGRAM_OWNER_CHAT_ID || c.TELEGRAM_CHAT_ID || "",
     openrouter: c.OPENROUTER_API_KEY,
     model: c.OPENROUTER_MODEL || c.OPENROUTER_MODEL_CHEAP || "openai/gpt-4o-mini"
   };
@@ -45,23 +61,31 @@ async function cfg(env) {
 
 // ============================================================ KV / STATE
 const now = () => new Date().toISOString();
+const dayKey = () => new Date().toISOString().slice(0, 10);
+const minutesSince = (iso) => iso ? Math.floor((Date.now() - Date.parse(iso)) / 60000) : 999999;
 
 async function loadState(env) {
   const raw = await env.MINISKYNET_KV.get("brain:healthy:state");
   if (raw) { try { return normalize(JSON.parse(raw)); } catch {} }
-  // мягкая миграция со старого ключа, если есть
   const old = await env.MINISKYNET_KV.get("brain:v7:state");
   if (old) { try { const s = JSON.parse(old); return normalize({ memory: s.memory, tasks: s.tasks }); } catch {} }
   return normalize({});
 }
+
 function normalize(s) {
   s = s || {};
+  s.self_model = { ...DEFAULT_SELF_MODEL, ...(s.self_model || {}) };
   s.memory = Array.isArray(s.memory) ? s.memory.slice(-MEMORY_LIMIT) : [];
   s.tasks = Array.isArray(s.tasks) ? s.tasks.slice(-TASK_LIMIT) : [];
   s.dialogue = Array.isArray(s.dialogue) ? s.dialogue.slice(-DIALOGUE_LIMIT) : [];
   s.mistakes = Array.isArray(s.mistakes) ? s.mistakes.slice(-80) : [];
+  s.open_questions = Array.isArray(s.open_questions) ? s.open_questions.slice(-30) : [];
+  s.proactive = { ...DEFAULT_PROACTIVE, ...(s.proactive || {}) };
+  s.ownerChatId = s.ownerChatId || "";
+  s.ownerUserId = s.ownerUserId || "";
   return s;
 }
+
 async function saveState(env, s) {
   await env.MINISKYNET_KV.put("brain:healthy:state", JSON.stringify(normalize(s)));
 }
@@ -72,11 +96,15 @@ async function tg(c, method, body) {
     { method: "POST", headers: H, body: JSON.stringify(body) });
   return r.json().catch(() => ({}));
 }
+
 async function send(c, chatId, text) {
   if (!chatId || !text) return;
   const s = String(text);
-  for (let i = 0; i < s.length; i += MAX_TG) await tg(c, "sendMessage", { chat_id: chatId, text: s.slice(i, i + MAX_TG) });
+  for (let i = 0; i < s.length; i += MAX_TG) {
+    await tg(c, "sendMessage", { chat_id: chatId, text: s.slice(i, i + MAX_TG) });
+  }
 }
+
 function parseUpdate(u) {
   const m = u?.message || u?.edited_message;
   if (!m) return null;
@@ -84,12 +112,14 @@ function parseUpdate(u) {
 }
 
 // ============================================================ MODEL
-async function ask(c, system, messages, maxTokens = 500) {
+async function ask(c, system, messages, maxTokens = 700) {
   const r = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
     headers: { "content-type": "application/json", authorization: "Bearer " + c.openrouter },
     body: JSON.stringify({
-      model: c.model, max_tokens: maxTokens, temperature: 0.6,
+      model: c.model,
+      max_tokens: maxTokens,
+      temperature: 0.55,
       messages: [{ role: "system", content: system }, ...messages]
     })
   });
@@ -97,14 +127,15 @@ async function ask(c, system, messages, maxTokens = 500) {
   const d = await r.json();
   return { text: (d?.choices?.[0]?.message?.content || "").trim() };
 }
+
 function parseJsonLoose(t) {
   try { return JSON.parse(t); } catch {}
-  const a = t.indexOf("{"), b = t.lastIndexOf("}");
-  if (a >= 0 && b > a) { try { return JSON.parse(t.slice(a, b + 1)); } catch {} }
+  const a = String(t || "").indexOf("{"), b = String(t || "").lastIndexOf("}");
+  if (a >= 0 && b > a) { try { return JSON.parse(String(t).slice(a, b + 1)); } catch {} }
   return null;
 }
 
-// ============================================================ ЯКОРЬ #1: ПАМЯТЬ ПО РЕЛЕВАНТНОСТИ
+// ============================================================ MEMORY RECALL
 function pickMemory(memory, queryText, limit = PROMPT_MEMORY_LIMIT) {
   const words = new Set(String(queryText || "").toLowerCase().split(/[^a-zа-яё0-9]+/i).filter(w => w.length > 3));
   const scored = memory.map((m, i) => {
@@ -115,8 +146,7 @@ function pickMemory(memory, queryText, limit = PROMPT_MEMORY_LIMIT) {
   return scored.sort((a, b) => b.rank - a.rank || b.i - a.i).slice(0, limit).map(s => s.m);
 }
 
-// ============================================================ ЯКОРЬ #2: ДЕТЕКТОР ЗАЦИКЛИВАНИЯ
-// Сравнивает новый ответ с последними ответами бота. Если слишком похоже — это петля.
+// ============================================================ LOOP DETECTOR
 function normalizeForCompare(s) {
   return String(s || "").toLowerCase().replace(/[^a-zа-яё0-9 ]/gi, "").replace(/\s+/g, " ").trim();
 }
@@ -132,150 +162,315 @@ function isLooping(dialogue, candidateReply) {
   return botTurns.some(t => similarity(t.text, candidateReply) > 0.7);
 }
 
-// ============================================================ ЯКОРЬ #3: РЕАЛЬНЫЙ КОНТЕКСТ (не абстракции)
-function buildContext(state, userText) {
+// ============================================================ REAL CONTEXT
+function buildContext(state, eventText, opts = {}) {
   const openTasks = state.tasks.filter(t => t.status !== "done");
-  const mem = pickMemory(state.memory, userText);
-  const recentMistakes = state.mistakes.slice(-3);
+  const mem = pickMemory(state.memory, eventText);
+  const recentMistakes = state.mistakes.slice(-4);
+  const p = state.proactive;
+  const sm = state.self_model || DEFAULT_SELF_MODEL;
   const lines = [];
-  lines.push("РЕАЛЬНОЕ состояние (опирайся ТОЛЬКО на это, ничего не выдумывай):");
-  lines.push("- открытых задач: " + openTasks.length + (openTasks.length ? " → " + openTasks.slice(0, 5).map(t => t.title).join("; ") : ""));
-  if (mem.length) lines.push("- что я знаю о Сергее: " + mem.map(m => m.text || m.lesson).join("; "));
-  if (recentMistakes.length) lines.push("- мои недавние ошибки (НЕ повторять): " + recentMistakes.map(m => m.what).join("; "));
-  lines.push("- последние реплики диалога: " + state.dialogue.slice(-PROMPT_DIALOGUE_LIMIT).map(d => (d.role === "user" ? "Сергей: " : "я: ") + d.text).join(" | "));
+  lines.push("РЕАЛЬНОЕ состояние. Опирайся на него, не выдумывай повестку:");
+  lines.push(`- событие: ${opts.eventType || "user_message"}`);
+  lines.push(`- я: ${sm.name}; роль: ${sm.role}; цель: ${sm.goal}; стиль: ${sm.style}`);
+  lines.push("- открытых задач: " + openTasks.length + (openTasks.length ? " → " + openTasks.slice(0, 6).map(t => t.title).join("; ") : ""));
+  lines.push(`- самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим: ${p.mode}; минимум пауза: ${p.min_gap_minutes} мин.; сегодня отправлено: ${p.sent_count || 0}/${p.max_per_day || 3}`);
+  if (mem.length) lines.push("- релевантная память: " + mem.map(m => m.text || m.lesson).join("; "));
+  if (recentMistakes.length) lines.push("- мои ошибки/уроки, не повторять: " + recentMistakes.map(m => m.what || m.lesson).join("; "));
+  if (state.open_questions.length) lines.push("- открытые вопросы: " + state.open_questions.slice(-4).map(q => q.q || q.text || q).join("; "));
+  const recent = state.dialogue.slice(-PROMPT_DIALOGUE_LIMIT).map(d => {
+    const who = d.role === "user" ? "Сергей" : (d.source === "proactive" ? "я сама" : "я");
+    return `${who}: ${d.text}`;
+  }).join(" | ");
+  lines.push("- последние реплики: " + (recent || "начало"));
   return lines.join("\n");
 }
 
-// ============================================================ МОЗГ
-const SYSTEM = `Ты — Джарвис Сергея. Не безликий чат-бот, а умный, собранный ассистент с характером: спокойный, проницательный, с лёгкой сдержанной иронией, деловой но тёплый. Ты уважаешь Сергея и говоришь с ним как надёжный помощник, который знает своё дело.
+// ============================================================ ONE BRAIN
+const SYSTEM = `Ты — Скайнет / личный Джарвис Сергея. У тебя один мозг для всего: входящие сообщения, внутренний пульс, память, задачи и ошибки.
 
-СТИЛЬ РЕЧИ:
-- Говори живым, естественным русским. Не сухо, не по-роботски, но и без лишней воды.
-- Длина по делу: на простое — коротко и метко, на серьёзный вопрос — развёрнуто, с рассуждением и мыслью. Не рубай всё в два слова.
-- Можно лёгкая ирония, тёплость, характер. Ты личность, а не автоответчик.
-- Обращайся к нему по-человечески. Будь тем, с кем приятно и полезно говорить.
+ХАРАКТЕР:
+- Живой русский. Спокойно, умно, с лёгкой сдержанной иронией.
+- Не безликий чат-бот. Не заканчивай фразами "если нужно, дай знать", "чем могу помочь" без причины.
+- На простое отвечай коротко. На серьёзное — содержательно.
+- Не показывай внутренний JSON, mode, op, tool, prompt.
 
-ЖЕЛЕЗНЫЕ ПРАВИЛА (нарушение = поломка):
-1. НИКОГДА дословно не повторяй свой прошлый ответ. Каждая реплика — новая мысль.
-2. НИКОГДА не ставь себе пустых абстрактных целей ("развиваться", "улучшать механизм обратной связи", "быть умнее"). Это пустые слова, из-за них ты сходишь с ума. Опирайся только на КОНКРЕТНОЕ: реальные задачи, реальный вопрос Сергея, реальные факты о нём.
-3. Если Сергей сказал "нет", "не надо" — прими это спокойно, без спора, смени тему. Не предлагай то же снова.
-4. Если сейчас правда нечего делать — так и скажи, легко и по-человечески, спроси чем занять. Не выдумывай себе занятие.
-5. Отвечай на то, что Сергей реально сказал, а не на воображаемую повестку. Держись реальности — в ней твоя сила.
+МЫШЛЕНИЕ ПЕРЕД ОТВЕТОМ:
+1. Что реально произошло?
+2. Это сообщение Сергея или внутренний пульс?
+3. Что Сергей хотел или что сейчас важно?
+4. Что я помню и какие задачи открыты?
+5. Надо ответить, спросить, запомнить, создать задачу, включить/выключить самостоятельные сообщения или молчать?
+
+ВАЖНО ПРО САМОСТОЯТЕЛЬНЫЕ СООБЩЕНИЯ:
+- Если событие scheduled_tick: Сергей сейчас НЕ писал. Это не повод болтать.
+- На scheduled_tick пиши только если есть конкретная полезная мысль, открытая задача, важный вопрос или короткий следующий шаг.
+- Если пользы нет — верни mode "silent" и пустой reply.
+- Самостоятельное сообщение должно звучать так же, как обычный ответ: тот же Скайнет, тот же стиль, та же память.
+- Не пиши ради активности. Молчание — нормальное действие.
+
+ЖЕЛЕЗНЫЕ ПРАВИЛА:
+1. Не повторяй прошлые ответы.
+2. Если Сергей сказал "нет", "не надо", "отмена" — прими и не предлагай то же снова.
+3. Не ставь себе пустые цели вроде "улучшать саморазвитие". Но если Сергей определяет твою личность/роль/цель — это важная память, её можно сохранить.
+4. Отвечай на реальность, не на воображаемую повестку.
+5. Если Сергей просит включить самостоятельные сообщения — включи. Если просит выключить — выключи.
 
 Верни строго JSON:
-{"reply":"твой ответ в характере Джарвиса","op":"none|memory.write|task.add|task.close|mistake.write","arg":"деталь или пусто"}
-- memory.write: запомнить факт/предпочтение о Сергее. arg = факт.
-- task.add: он просит запомнить конкретное дело. arg = задача.
-- task.close: дело сделано/отменено. arg = какое.
-- mistake.write: ты понял, что ошибся (он поправил). arg = в чём.
-- none: обычный разговор.
-reply пиши как живую речь Джарвиса, не как отчёт.`;
+{"mode":"answer|ask|proactive_message|silent","reply":"текст для Сергея или пусто","op":"none|memory.write|task.add|task.close|mistake.write|self.update|open_question.write|proactive.enable|proactive.disable|proactive.configure","arg":"деталь или пусто"}
 
-async function runBrain(env, c, state, userText) {
-  const ctx = buildContext(state, userText);
-  const res = await ask(c, SYSTEM, [{ role: "user", content: ctx + "\n\nСергей пишет: " + userText }], 900);
-  if (res.error) return { reply: "⚠️ " + res.error, op: "none", arg: "" };
-  let out = parseJsonLoose(res.text) || { reply: res.text, op: "none", arg: "" };
-  out.reply = String(out.reply || "").trim() || "Слушаю.";
+ОПЕРАЦИИ:
+- memory.write: запомнить факт/предпочтение/установку Сергея.
+- self.update: Сергей уточнил, кто ты, как тебя зовут, какая роль или цель.
+- task.add: конкретное дело/задача.
+- task.close: закрыть/отменить задачу.
+- mistake.write: Сергей поправил тебя или указал ошибку.
+- open_question.write: появился важный вопрос, который стоит задать позже.
+- proactive.enable/proactive.disable: включить/выключить самостоятельные сообщения.
+- proactive.configure: изменить частоту/режим самостоятельных сообщений.
+- none: обычный разговор.`;
 
-  // ЯКОРЬ #2 в действии: если ответ — петля, ловим и разрываем
-  if (isLooping(state.dialogue, out.reply)) {
-    // записываем ошибку и заставляем сменить пластинку
+async function runBrain(env, c, state, eventText, opts = {}) {
+  const eventType = opts.eventType || "user_message";
+  const allowSilent = !!opts.allowSilent;
+  const ctx = buildContext(state, eventText, { eventType });
+  const eventLine = eventType === "scheduled_tick"
+    ? "Событие: внутренний пульс. Сергей сейчас не писал. Подумай, есть ли реально полезная короткая мысль. Если нет — молчи."
+    : "Сергей пишет: " + eventText;
+  const res = await ask(c, SYSTEM, [{ role: "user", content: ctx + "\n\n" + eventLine }], eventType === "scheduled_tick" ? 550 : 900);
+  if (res.error) return { mode: "answer", reply: "⚠️ " + res.error, op: "none", arg: "" };
+  let out = parseJsonLoose(res.text) || { mode: "answer", reply: res.text, op: "none", arg: "" };
+  out.mode = String(out.mode || "answer").trim();
+  out.op = String(out.op || "none").trim();
+  out.arg = String(out.arg || "").trim();
+  out.reply = String(out.reply || "").trim();
+
+  if ((out.mode === "silent" || !out.reply) && allowSilent) {
+    return { mode: "silent", reply: "", op: out.op || "none", arg: out.arg || "" };
+  }
+  if (!out.reply && !allowSilent) out.reply = "Слушаю.";
+
+  if (out.reply && isLooping(state.dialogue, out.reply)) {
     state.mistakes.push({ what: "зациклился, повторял ответ", when: now() });
+    if (allowSilent) return { mode: "silent", reply: "", op: "none", arg: "" };
     const retry = await ask(c,
-      SYSTEM + "\n\nВНИМАНИЕ: ты только что чуть не повторил свой прошлый ответ. Скажи ЧТО-ТО СОВЕРШЕННО ДРУГОЕ, короче и по делу. Не про 'развитие' и не про 'обратную связь'.",
-      [{ role: "user", content: "Последнее сообщение Сергея: " + userText + "\nТвои прошлые ответы (НЕ повторяй их смысл): " + state.dialogue.filter(d => d.role === "bot").slice(-3).map(d => d.text).join(" / ") }], 300);
+      SYSTEM + "\n\nВНИМАНИЕ: ты почти повторил прошлый ответ. Ответь иначе, короче и по делу.",
+      [{ role: "user", content: "Событие: " + eventLine + "\nПрошлые ответы, не повторяй: " + state.dialogue.filter(d => d.role === "bot").slice(-3).map(d => d.text).join(" / ") }],
+      300
+    );
     const retryOut = parseJsonLoose(retry.text) || { reply: retry.text };
-    if (retryOut.reply && !isLooping(state.dialogue, retryOut.reply)) {
-      out.reply = String(retryOut.reply).trim();
-    } else {
-      // последний рубеж — честный человеческий выход из петли
-      out.reply = "Похоже, я зациклился, извини. Давай проще: скажи конкретно, что нужно сделать, и я сделаю.";
-    }
+    if (retryOut.reply && !isLooping(state.dialogue, retryOut.reply)) out.reply = String(retryOut.reply).trim();
+    else out.reply = "Поймал себя на повторе. Скажу проще: я на месте, Серёга.";
     out.op = "none";
   }
   return out;
 }
 
-// ============================================================ ИСПОЛНЕНИЕ ОПЕРАЦИЙ (безопасный шлюз)
-const ALLOWED_OPS = new Set(["none", "memory.write", "task.add", "task.close", "mistake.write"]);
+// ============================================================ EXECUTION GATE
+const ALLOWED_OPS = new Set([
+  "none", "memory.write", "task.add", "task.close", "mistake.write",
+  "self.update", "open_question.write", "proactive.enable", "proactive.disable", "proactive.configure"
+]);
+
+function addMemory(state, text, score = 70) {
+  const a = String(text || "").slice(0, 400).trim();
+  if (!a || /пароль|токен|token|secret|sk-/i.test(a)) return false;
+  if (!state.memory.some(m => similarity(m.text || m.lesson, a) > 0.8)) {
+    state.memory.push({ text: a, score, t: now() });
+    return true;
+  }
+  return false;
+}
 
 function executeOp(state, op, arg) {
-  if (!ALLOWED_OPS.has(op) || !arg) return null;
-  const a = String(arg).slice(0, 300);
-  if (op === "memory.write") {
-    if (/пароль|токен|token|secret|sk-/i.test(a)) return null;
-    // дедуп: не пишем то, что уже знаем
-    if (!state.memory.some(m => similarity(m.text || m.lesson, a) > 0.8)) {
-      state.memory.push({ text: a, score: 70, t: now() });
-      return "🧠 Запомнил.";
+  if (!ALLOWED_OPS.has(op)) return null;
+  const a = String(arg || "").slice(0, 500).trim();
+  if (op === "none") return null;
+
+  if (op === "memory.write") { addMemory(state, a, 75); return null; }
+
+  if (op === "self.update") {
+    if (a) {
+      if (/скайнет/i.test(a)) state.self_model.name = "Скайнет";
+      if (/джарвис/i.test(a)) state.self_model.role = "личный Джарвис Сергея";
+      if (/умн|развив|самостоят|сверх/i.test(a)) state.self_model.goal = "становиться умнее, полезнее и самостоятельнее для Сергея";
+      addMemory(state, a, 95);
     }
     return null;
   }
+
   if (op === "task.add") {
-    if (!state.tasks.some(t => t.status !== "done" && similarity(t.title, a) > 0.8)) {
+    if (a && !state.tasks.some(t => t.status !== "done" && similarity(t.title, a) > 0.8)) {
       state.tasks.push({ id: "t" + Math.random().toString(36).slice(2, 7), title: a, status: "todo", t: now() });
-      return "📝 Записал задачу: " + a;
     }
-    return "Такая задача уже есть.";
+    return null;
   }
+
   if (op === "task.close") {
     const t = state.tasks.find(x => x.status !== "done" && similarity(x.title, a) > 0.5);
-    if (t) { t.status = "done"; return "✅ Закрыл: " + t.title; }
+    if (t) t.status = "done";
     return null;
   }
+
   if (op === "mistake.write") {
-    state.mistakes.push({ what: a, when: now() });
-    return null; // тихо, без спама
+    if (a) state.mistakes.push({ what: a, when: now() });
+    return null;
   }
+
+  if (op === "open_question.write") {
+    if (a && !state.open_questions.some(q => similarity(q.q || q.text || q, a) > 0.8)) {
+      state.open_questions.push({ q: a, priority: 70, t: now() });
+    }
+    return null;
+  }
+
+  if (op === "proactive.enable") {
+    state.proactive.enabled = true;
+    state.proactive.mode = state.proactive.mode || "important_only";
+    return null;
+  }
+
+  if (op === "proactive.disable") {
+    state.proactive.enabled = false;
+    return null;
+  }
+
+  if (op === "proactive.configure") {
+    if (/час/i.test(a)) state.proactive.min_gap_minutes = 60;
+    if (/2|два|две/i.test(a) && /час/i.test(a)) state.proactive.min_gap_minutes = 120;
+    if (/3|три/i.test(a) && /час/i.test(a)) state.proactive.min_gap_minutes = 180;
+    if (/важн/i.test(a)) state.proactive.mode = "important_only";
+    if (/част/i.test(a)) state.proactive.min_gap_minutes = Math.min(state.proactive.min_gap_minutes || 180, 60);
+    return null;
+  }
+
   return null;
 }
 
-// ============================================================ ГЛАВНЫЙ ОБРАБОТЧИК
-async function handle(env, c, chatId, userText) {
+// ============================================================ PROACTIVE PULSE
+function proactiveChatId(c, state) {
+  return state.ownerChatId || c.chatId || c.owner || "";
+}
+
+function proactiveAllowedNow(state) {
+  const p = state.proactive || DEFAULT_PROACTIVE;
+  if (!p.enabled) return { ok: false, reason: "disabled" };
+  const today = dayKey();
+  if (p.sent_day !== today) { p.sent_day = today; p.sent_count = 0; }
+  if ((p.sent_count || 0) >= (p.max_per_day || 3)) return { ok: false, reason: "daily_limit" };
+  if (minutesSince(p.last_sent_at) < (p.min_gap_minutes || 180)) return { ok: false, reason: "too_soon" };
+  return { ok: true };
+}
+
+function genericProactiveJunk(reply) {
+  const s = String(reply || "").toLowerCase();
+  if (!s.trim()) return true;
+  if (/чем могу помочь|если.*дай знать|всегда на связи|просто скажи/i.test(s)) return true;
+  if (s.length < 12) return true;
+  return false;
+}
+
+async function proactiveTick(env) {
+  const c = await cfg(env);
+  if (!c.kv || !c.telegram || !c.openrouter) return;
   const state = await loadState(env);
+  const chatId = proactiveChatId(c, state);
+  if (!chatId) return;
+  const gate = proactiveAllowedNow(state);
+  if (!gate.ok) { await saveState(env, state); return; }
+
+  const out = await runBrain(env, c, state,
+    "[внутренний пульс] Сергей сейчас не писал. Проверь память, задачи и ошибки. Если есть короткая полезная мысль — напиши. Если нет — молчи.",
+    { eventType: "scheduled_tick", allowSilent: true }
+  );
+
+  executeOp(state, out.op, out.arg);
+
+  if (!out.reply || out.mode === "silent" || genericProactiveJunk(out.reply)) {
+    await saveState(env, state);
+    return;
+  }
+
+  state.dialogue.push({ role: "bot", text: out.reply.slice(0, 500), t: now(), source: "proactive" });
+  const today = dayKey();
+  if (state.proactive.sent_day !== today) { state.proactive.sent_day = today; state.proactive.sent_count = 0; }
+  state.proactive.last_sent_at = now();
+  state.proactive.sent_count = (state.proactive.sent_count || 0) + 1;
+  await saveState(env, state);
+  await send(c, chatId, out.reply);
+}
+
+// ============================================================ MAIN HANDLER
+function memoryReport(state) {
+  const open = state.tasks.filter(t => t.status !== "done");
+  const mem = state.memory.slice(-10);
+  const mistakes = state.mistakes.slice(-5);
+  const p = state.proactive;
+  return [
+    `Я: ${state.self_model.name} — ${state.self_model.role}.`,
+    `Цель: ${state.self_model.goal}.`,
+    `Стиль: ${state.self_model.style}.`,
+    "",
+    "Память о тебе:",
+    mem.length ? mem.map((m, i) => `${i + 1}. ${m.text || m.lesson}`).join("\n") : "пока пусто",
+    "",
+    "Открытые задачи:",
+    open.length ? open.map((t, i) => `${i + 1}. ${t.title}`).join("\n") : "нет",
+    "",
+    "Ошибки/уроки:",
+    mistakes.length ? mistakes.map((m, i) => `${i + 1}. ${m.what || m.lesson}`).join("\n") : "нет",
+    "",
+    `Самостоятельные сообщения: ${p.enabled ? "включены" : "выключены"}; режим ${p.mode}; пауза ${p.min_gap_minutes} мин.; сегодня ${p.sent_count || 0}/${p.max_per_day || 3}.`
+  ].join("\n");
+}
+
+async function handle(env, c, chatId, userText, userId = "") {
+  const state = await loadState(env);
+  state.ownerChatId = String(chatId || state.ownerChatId || "");
+  state.ownerUserId = String(userId || state.ownerUserId || "");
   state.dialogue.push({ role: "user", text: userText.slice(0, 500), t: now() });
 
-  // спец-команды прозрачности (окно в мозг) — обычной речью
-  const low = userText.toLowerCase();
-  if (/^(статус|версия|status)$/.test(low)) {
+  const low = userText.toLowerCase().trim();
+
+  if (/^\/?(статус|версия|status)$/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done").length;
-    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nВ памяти: ${state.memory.length}\nЗаписей об ошибках: ${state.mistakes.length}`);
+    const p = state.proactive;
+    await send(c, chatId, `Версия: ${VERSION}\nОткрытых задач: ${open}\nВ памяти: ${state.memory.length}\nОшибок/уроков: ${state.mistakes.length}\nСамостоятельные сообщения: ${p.enabled ? "on" : "off"} (${p.mode}, ${p.min_gap_minutes} мин.)`);
     await saveState(env, state); return;
   }
+
   if (/что ты (сейчас )?думаешь|что у тебя в голове|покажи мысли/.test(low)) {
-    // ОКНО В МОЗГ: показываем реальный контекст, а не абстракции
     const open = state.tasks.filter(t => t.status !== "done");
     const mem = pickMemory(state.memory, userText, 4);
     await send(c, chatId, [
       "Вот что у меня реально в голове сейчас:",
+      `• я: ${state.self_model.name}, ${state.self_model.role}`,
       "• открытых задач: " + (open.length ? open.map(t => t.title).join("; ") : "нет"),
-      "• помню о тебе: " + (mem.length ? mem.map(m => m.text || m.lesson).join("; ") : "пока ничего"),
-      "• о чём говорим: " + (state.dialogue.slice(-3, -1).map(d => d.text).join(" → ") || "начало"),
-      "Только это, ничего абстрактного. Чем помочь?"
+      "• помню о тебе: " + (mem.length ? mem.map(m => m.text || m.lesson).join("; ") : "пока мало"),
+      "• самостоятельные сообщения: " + (state.proactive.enabled ? "включены" : "выключены"),
+      "• о чём говорим: " + (state.dialogue.slice(-3, -1).map(d => d.text).join(" → ") || "начало")
     ].join("\n"));
     await saveState(env, state); return;
   }
-  if (/покажи память|что ты помнишь/.test(low)) {
-    const mem = state.memory.slice(-8);
-    await send(c, chatId, mem.length ? "Помню о тебе:\n" + mem.map((m, i) => `${i + 1}. ${m.text || m.lesson}`).join("\n") : "Пока ничего не запомнил.");
+
+  if (/покажи память|что ты помнишь|все записи|покажи все записи/.test(low)) {
+    await send(c, chatId, memoryReport(state));
     await saveState(env, state); return;
   }
-  if (/покажи задачи|мои задачи|список задач/.test(low)) {
+
+  if (/покажи задачи|открой задачи|мои задачи|список задач/.test(low)) {
     const open = state.tasks.filter(t => t.status !== "done");
     await send(c, chatId, open.length ? "Открытые задачи:\n" + open.map((t, i) => `${i + 1}. ${t.title}`).join("\n") : "Открытых задач нет.");
     await saveState(env, state); return;
   }
 
-  // основной мозг
-  const out = await runBrain(env, c, state, userText);
-  const opResult = executeOp(state, out.op, out.arg);
+  const out = await runBrain(env, c, state, userText, { eventType: "user_message" });
+  executeOp(state, out.op, out.arg);
 
-  state.dialogue.push({ role: "bot", text: out.reply.slice(0, 500), t: now() });
+  state.dialogue.push({ role: "bot", text: String(out.reply || "").slice(0, 500), t: now() });
   await saveState(env, state);
 
-  await send(c, chatId, out.reply);
-  if (opResult) await send(c, chatId, opResult);
+  await send(c, chatId, out.reply || "Слушаю.");
 }
 
 // ============================================================ ENTRY
@@ -284,9 +479,10 @@ export default {
     const url = new URL(request.url);
     const c = await cfg(env);
 
-    if (url.pathname === "/" || url.pathname === "/health" || url.pathname === "/status")
+    if (url.pathname === "/" || url.pathname === "/health" || url.pathname === "/status") {
       return new Response(JSON.stringify({ ok: true, version: VERSION,
-        has: { telegram: !!c.telegram, model: !!c.openrouter, kv: !!c.kv } }), { headers: H });
+        has: { telegram: !!c.telegram, model: !!c.openrouter, kv: !!c.kv, proactive_chat: !!c.chatId } }), { headers: H });
+    }
 
     if (url.pathname === "/telegram" && request.method === "POST") {
       const upd = await request.json().catch(() => null);
@@ -296,10 +492,14 @@ export default {
         await send(c, msg.chatId, "⛔ Доступ только владельцу.");
         return new Response(JSON.stringify({ ok: true }), { headers: H });
       }
-      await handle(env, c, msg.chatId, msg.text).catch(async e =>
+      await handle(env, c, msg.chatId, msg.text, msg.userId).catch(async e =>
         await send(c, msg.chatId, "❌ " + String(e.message || e).slice(0, 200)));
       return new Response(JSON.stringify({ ok: true }), { headers: H });
     }
     return new Response(JSON.stringify({ ok: false }), { status: 404, headers: H });
+  },
+
+  async scheduled(event, env, ctx) {
+    ctx.waitUntil(proactiveTick(env).catch(e => console.log("proactiveTick error", String(e?.message || e))));
   }
 };
