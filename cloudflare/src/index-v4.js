@@ -1,4 +1,4 @@
-const VERSION = "v7.4.1-user-first-director-goal-balance-2026-07-07";
+const VERSION = "v7.4.2-task-context-agenda-memory-2026-07-07";
 const FILE_NAME = "index-v4.js";
 const BRAIN_KEY = "brain:v7:state";
 const MAX_TELEGRAM_TEXT = 3900;
@@ -7,6 +7,7 @@ const TASK_LIMIT = 160;
 const EXPERIENCE_LIMIT = 180;
 const MISTAKE_LIMIT = 120;
 const WORKING_TURN_LIMIT = 16;
+const AGENDA_STEP_LIMIT = 12;
 const PROMPT_MEMORY_LIMIT = 8;
 const PROMPT_EXPERIENCE_LIMIT = 6;
 const PROMPT_TURN_LIMIT = 6;
@@ -83,6 +84,7 @@ const TOOL_REGISTRY = {
   development_context: { available: true, can: ["discuss_growth", "plan_next_layer", "remember_development_direction"] },
   memory: { available: true, can: ["remember", "recall", "learn_from_mistakes"] },
   tasks: { available: true, can: ["add", "list", "close"] },
+  agenda: { available: true, can: ["show", "propose_next_task", "turn_goal_into_plan", "track_current_step"] },
   pending: { available: true, can: ["remember_last_offer", "execute_last_offer", "cancel_last_offer"] },
   scheduler: { available: false, human_name: "напоминания" },
   file_access: { available: false, human_name: "чтение файлов" },
@@ -98,6 +100,14 @@ const USER_FIRST_LESSONS = [
   "Сначала отвечай на текущую реплику Сергея. Только если он явно говорит о развитии — поднимай план развития.",
   "Не спрашивать 'как ты видишь следующий шаг' и не просить 'делись идеями', если можно самой назвать следующий шаг.",
   "Не говорить 'я хочу развивать SKYNET' как бот. Лучше: моя цель — стать полезнее для Сергея, следующий шаг — конкретный слой."
+];
+
+const AGENDA_LESSONS = [
+  "Вопросы Сергея 'что у нас по задачам', 'что дальше', 'с чего начнём' относятся к рабочей повестке, а не к абстрактному саморазвитию.",
+  "Если активных задач нет, не уходить в обсуждение механизма обратной связи. Назови текущий слой, проблему и предложи создать одну конкретную задачу.",
+  "Цель стать Джарвисом должна превращаться в рабочий план: текущий слой, следующий шаг, критерий проверки.",
+  "На просьбу 'предлагай как' отвечай планом из 2–3 шагов и вопросом 'делаем?', а не общим обсуждением.",
+  "Задачи — это не память вообще. Это активная повестка: что сейчас делаем, что следующее, что считать готовым."
 ];
 
 const now = () => new Date().toISOString();
@@ -281,12 +291,12 @@ function defaultState() {
     },
     working: {
       topic: "создание цифрового мозга SKYNET",
-      focus: "развить рабочую память и опыт, чтобы не сбрасываться в обычного бота",
+      focus: "вести рабочую повестку и превращать цель развития в конкретные задачи",
       situation: "Сергей проверяет, станет ли SKYNET похож на личного Джарвиса, а не на сервисного чат-бота.",
       user_mood: "требовательный, проверяет качество",
       current_goal: "стать умным помощником Сергея уровня Джарвиса по полезности",
-      current_obstacle: "память пока есть как факты, но опыт ещё слабо меняет поведение",
-      next_step: "усилить внимание и модель ситуации, чтобы понимать что сейчас главное",
+      current_obstacle: "цель развития есть, но без повестки агент уходит в общие разговоры",
+      next_step: "вести рабочую повестку: задачи, текущий слой и следующий конкретный шаг",
       attention: {
         primary_signal: "development",
         continuity: "standalone",
@@ -321,6 +331,7 @@ function defaultState() {
       open_loop: null,
       updated_at: t
     },
+    agenda: defaultAgenda(),
     tasks: [],
     pending: null,
     experience: [
@@ -353,6 +364,8 @@ function normalizeState(s) {
     if (!Array.isArray(out.memory[k])) out.memory[k] = d.memory[k] || [];
   }
   ensureUserFirstLessons(out);
+  ensureAgendaLessons(out);
+  out.agenda = normalizeAgenda(out.agenda, out);
   out.working = { ...d.working, ...(isObj(out.working) ? out.working : {}) };
   if (!isObj(out.working.attention)) out.working.attention = d.working.attention;
   if (!isObj(out.working.situation_model)) out.working.situation_model = d.working.situation_model;
@@ -362,6 +375,7 @@ function normalizeState(s) {
   if (!Array.isArray(out.tasks)) out.tasks = [];
   if (!Array.isArray(out.experience)) out.experience = [];
   if (!isObj(out.pending)) out.pending = null;
+  if (out.pending && isStaleGenericDevelopmentPending(out.pending)) out.pending = null;
   out.updated_at = now();
   return out;
 }
@@ -399,6 +413,7 @@ function trimState(state) {
     state.working.recent_turns = state.working.recent_turns.slice(-WORKING_TURN_LIMIT);
   }
   state.tasks = (state.tasks || []).slice(-TASK_LIMIT);
+  state.agenda = normalizeAgenda(state.agenda, state);
   state.experience = (state.experience || []).slice(-EXPERIENCE_LIMIT);
   if (state.pending?.expires_at && Date.parse(state.pending.expires_at) < Date.now()) {
     state.pending = null;
@@ -410,6 +425,7 @@ function stateForPrompt(state, userText = "") {
     identity: state.identity,
     attention: buildAttentionModel(state, userText),
     situation_model: buildSituationModel(state, userText),
+    agenda: buildAgendaModel(state, userText),
     director: buildInnerDirector(state, userText),
     memory: {
       about_user: pickMemory(state.memory.about_user, userText, PROMPT_MEMORY_LIMIT).map((m) => m.text),
@@ -422,6 +438,7 @@ function stateForPrompt(state, userText = "") {
     },
     working: workingForPrompt(state),
     active_tasks: activeTasks(state).slice(0, 12).map((t) => ({ id: t.id, title: t.title, details: t.details || "" })),
+    agenda: buildAgendaModel(state, userText),
     pending: state.pending ? { label: state.pending.label, action: state.pending.action, created_at: state.pending.created_at } : null,
     dialogue_continuity: {
       last_user: state.working?.last_user || "",
@@ -451,6 +468,7 @@ function workingForPrompt(state) {
     expecting: w.expecting || "",
     mood: w.mood || "",
     open_loop: w.open_loop || null,
+    agenda: isObj(state.agenda) ? state.agenda : null,
     attention: isObj(w.attention) ? w.attention : null,
     situation_model: isObj(w.situation_model) ? w.situation_model : null,
     director: isObj(w.director) ? w.director : null,
@@ -509,6 +527,113 @@ function exp(event, text, meta = {}) {
   return { id: id("exp"), event: clean(event), text: clean(text), meta, created_at: now() };
 }
 
+function defaultAgenda() {
+  return {
+    current_layer: "v7.4.2 Task Context / Agenda Memory",
+    purpose: "превратить цель стать умным помощником в рабочую повестку с конкретными задачами",
+    current_problem: "SKYNET помнит цель, но без повестки уходит в общие разговоры о саморазвитии",
+    next_task_title: "Task Context / Agenda Memory",
+    next_task_details: "Научиться отвечать на 'что по задачам', 'что дальше', 'с чего начнём' через рабочий план: текущий слой, проблема, следующий шаг, критерий проверки.",
+    done_definition: "На 'что у нас по задачам' агент показывает активные задачи или предлагает одну конкретную задачу, а не обсуждает абстрактную обратную связь.",
+    plan: [
+      "Сделать рабочую повестку: текущий слой, проблема, следующий шаг, критерий проверки.",
+      "Если задач нет — предложить первую конкретную задачу, а не уходить в болтовню.",
+      "После подтверждения Сергея добавить задачу и держать её как активный фокус."
+    ],
+    updated_at: now()
+  };
+}
+
+function normalizeAgenda(a, state = null) {
+  const d = defaultAgenda();
+  const out = { ...d, ...(isObj(a) ? a : {}) };
+  out.current_layer = clean(out.current_layer || d.current_layer);
+  out.purpose = clean(out.purpose || d.purpose);
+  out.current_problem = clean(out.current_problem || d.current_problem);
+  out.next_task_title = clean(out.next_task_title || d.next_task_title);
+  out.next_task_details = clean(out.next_task_details || d.next_task_details);
+  out.done_definition = clean(out.done_definition || d.done_definition);
+  out.plan = Array.isArray(out.plan) ? out.plan.map(clean).filter(Boolean).slice(0, AGENDA_STEP_LIMIT) : d.plan;
+  out.updated_at = out.updated_at || now();
+  return out;
+}
+
+function ensureAgendaLessons(state) {
+  if (!isObj(state.memory)) return;
+  if (!Array.isArray(state.memory.lessons)) state.memory.lessons = [];
+  for (const lesson of AGENDA_LESSONS) {
+    const exists = state.memory.lessons.some((m) => similarText(m.text || "", lesson));
+    if (!exists) state.memory.lessons.unshift(mem(lesson, "v7.4.2_agenda", 100));
+  }
+}
+
+function isStaleGenericDevelopmentPending(p) {
+  const raw = lower([p?.label, p?.action?.title, p?.action?.details].filter(Boolean).join(" "));
+  return raw.includes("разработка функции саморазвития") || raw.includes("возможность саморазвития");
+}
+
+function isAgendaQuestion(text = "", state = null) {
+  const s = lower(text);
+  if (!s) return false;
+  const direct = [
+    "что у нас по задачам", "что по задачам", "какие задачи", "список задач", "покажи задачи", "задачи", "таски", "повестка", "план работ"
+  ].some((x) => s === x || s.includes(x));
+  if (direct) return true;
+  const planning = ["что дальше", "дальше что", "с чего начнем", "с чего начнём", "начнем", "начнём", "предлагай", "как начнем", "как начнём", "какой следующий шаг"].some((x) => s === x || s.includes(x));
+  if (!planning) return false;
+  const w = state?.working || {};
+  const ctx = lower([w.topic, w.focus, w.situation, w.current_goal, state?.identity?.main_goal, state?.agenda?.purpose].filter(Boolean).join(" "));
+  return ctx.includes("skynet") || ctx.includes("джарвис") || ctx.includes("мозг") || ctx.includes("помощник") || ctx.includes("развит");
+}
+
+function buildAgendaModel(state, userText = "") {
+  const agenda = normalizeAgenda(state?.agenda, state);
+  const active = activeTasks(state || {});
+  const asking = isAgendaQuestion(userText, state);
+  return {
+    active: true,
+    asking_agenda: asking,
+    current_layer: agenda.current_layer,
+    purpose: agenda.purpose,
+    current_problem: agenda.current_problem,
+    active_tasks_count: active.length,
+    active_tasks: active.slice(0, 8).map((t) => ({ id: t.id, title: t.title, details: t.details || "" })),
+    next_task_title: agenda.next_task_title,
+    next_task_details: agenda.next_task_details,
+    done_definition: agenda.done_definition,
+    plan: agenda.plan,
+    recommended_answer: active.length
+      ? "показать активные задачи и назвать ближайший следующий ход"
+      : "сказать, что активных задач нет, назвать текущую повестку и предложить создать одну конкретную задачу"
+  };
+}
+
+function agendaFallbackSpeech(state, text = "") {
+  const a = buildAgendaModel(state, text);
+  if (a.active_tasks_count > 0) {
+    const list = a.active_tasks.map((t, i) => `${i + 1}. ${t.title}`).join("\n");
+    return `Активные задачи:
+${list}
+
+Следующий ход: ${a.next_task_title}.`;
+  }
+  if (lower(text).includes("предлагай") || lower(text).includes("с чего")) {
+    return `Предлагаю так:
+
+1. Создаём задачу: ${a.next_task_title}.
+2. В ней держу текущий слой, проблему и следующий шаг.
+3. Проверяем по одному сценарию: “что у нас по задачам” → конкретная повестка.
+
+Делаем?`;
+  }
+  return `Активных задач нет.
+
+Текущая повестка: ${a.next_task_title}.
+Смысл: ${a.current_problem}.
+
+Создать задачу?`;
+}
+
 
 function buildAttentionModel(state, userText = "") {
   const text = clean(userText);
@@ -520,7 +645,8 @@ function buildAttentionModel(state, userText = "") {
   const standaloneGoal = isStandaloneGoalQuestion(s);
   const greeting = isSimpleGreeting(text);
   const followup = isLikelyFollowupQuestion(s) && !standaloneIdentity && !standaloneMemory && !standaloneGoal && !greeting;
-  const dev = isDevelopmentContext(state, text) || isDevelopmentStatement(text);
+  const agenda = isAgendaQuestion(text, state);
+  const dev = !agenda && (isDevelopmentContext(state, text) || isDevelopmentStatement(text));
   const askingStatus = s.includes("вис") || s.includes("тормоз") || s.includes("долго") || s.includes("медлен") || s.includes("лага");
   const criticism = s.includes("не то") || s.includes("опять") || s.includes("туп") || s.includes("позор") || s.includes("не смог") || s.includes("плохо");
   const actionRequest = /\b(делай|сделай|добавь|поставь|проверь|покажи|закрой|создай|запомни)\b/i.test(text);
@@ -535,6 +661,7 @@ function buildAttentionModel(state, userText = "") {
   else if (standaloneIdentity) primary = "identity";
   else if (standaloneMemory) primary = "memory";
   else if (standaloneGoal) primary = "goal";
+  else if (agenda) primary = "agenda";
   else if (dev) primary = "development";
   else if (askingStatus) primary = "runtime_status";
   else if (criticism) primary = "criticism_or_quality_check";
@@ -547,6 +674,7 @@ function buildAttentionModel(state, userText = "") {
     is_question: question,
     is_action_request: actionRequest,
     is_development_conversation: dev,
+    is_agenda_request: agenda,
     is_quality_criticism: criticism,
     is_runtime_status_question: askingStatus,
     standalone_identity_question: standaloneIdentity,
@@ -581,7 +709,8 @@ function buildSituationModel(state, userText = "") {
     missing_body: Object.entries(TOOL_REGISTRY).filter(([, v]) => !v?.available).map(([k, v]) => v.human_name || k).slice(0, 8),
     recommended_cognitive_move: inferRecommendedMove(attention),
     last_agent_anchor: clean(w.last_agent_meaning || w.last_agent || ""),
-    next_step_from_memory: clean(w.next_step || "")
+    next_step_from_memory: clean(w.next_step || ""),
+    agenda: buildAgendaModel(state, userText)
   };
 }
 
@@ -590,6 +719,7 @@ function inferUserGoalGuess(state, text, primary) {
   if (primary === "identity") return "понять, есть ли у агента личность";
   if (primary === "memory") return "проверить, что агент реально помнит";
   if (primary === "goal") return "проверить цель и направление развития";
+  if (primary === "agenda") return "понять текущую повестку, задачи и следующий конкретный шаг";
   if (primary === "development") return "развить SKYNET до личного помощника уровня Джарвиса";
   if (primary === "runtime_status") return "понять, почему агент тормозит или зависает";
   if (primary === "criticism_or_quality_check") return "проверить, признаёт ли агент ошибку и меняет подход";
@@ -610,6 +740,7 @@ function inferResponseMode(primary, text) {
   if (primary === "greeting") return "presence_short";
   if (primary === "criticism_or_quality_check") return "honest_diagnosis_then_next_step";
   if (primary === "runtime_status") return "brief_cause_and_fix_direction";
+  if (primary === "agenda") return "agenda_with_next_action";
   if (primary === "development") return "agent_position_with_next_layer";
   if (primary === "identity") return "identity_short";
   if (primary === "memory") return "memory_brief";
@@ -622,6 +753,7 @@ function inferScene(state, userText, attention) {
   if (attention.primary_signal === "greeting") return "Сергей просто здоровается; нужно коротко подтвердить присутствие, не начинать тему развития.";
   if (attention.primary_signal === "runtime_status") return "Сергей заметил задержки и проверяет, почему мозг отвечает медленно.";
   if (attention.primary_signal === "criticism_or_quality_check") return "Сергей проверяет качество мышления SKYNET и не хочет повторения пути с костылями.";
+  if (attention.primary_signal === "agenda") return "Сергей спрашивает рабочую повестку: что сейчас в задачах, с чего начать или какой следующий конкретный шаг.";
   if (attention.primary_signal === "development") return "Сергей строит цифровой мозг SKYNET и двигает следующий слой развития.";
   if (attention.primary_signal === "identity") return "Сергей проверяет личность агента.";
   if (attention.primary_signal === "continuity") return "Сергей уточняет предыдущую реплику; нужно держать нить диалога.";
@@ -632,6 +764,7 @@ function inferWhatUserIsDoing(attention) {
   if (attention.primary_signal === "greeting") return "здоровается";
   if (attention.primary_signal === "runtime_status") return "спрашивает причину задержки/зависания";
   if (attention.primary_signal === "criticism_or_quality_check") return "указывает на ошибку или проверяет качество";
+  if (attention.primary_signal === "agenda") return "просит рабочую повестку или конкретное предложение";
   if (attention.primary_signal === "development") return "задаёт следующий слой развития";
   if (attention.primary_signal === "identity") return "проверяет самоописание агента";
   if (attention.primary_signal === "memory") return "проверяет память";
@@ -643,6 +776,7 @@ function inferWhatUserIsDoing(attention) {
 function inferCurrentTension(attention, state) {
   if (attention.primary_signal === "runtime_status") return "нужно не ускорять тупыми перехватами, а сохранить один мозг и уменьшить контекст";
   if (attention.primary_signal === "criticism_or_quality_check") return "нужно признать сбой и менять общий механизм, не лепить частный фикс";
+  if (attention.primary_signal === "agenda") return "нужна конкретная рабочая повестка, а не разговор о саморазвитии вообще";
   if (attention.primary_signal === "development") return "нужно строить мозг слоями: внимание, модель ситуации, директор, опыт, инструменты";
   return clean(state?.working?.current_obstacle || "не потерять контекст и ответить по смыслу");
 }
@@ -651,6 +785,7 @@ function inferRecommendedMove(attention) {
   if (attention.primary_signal === "greeting") return "коротко подтвердить присутствие: я на месте";
   if (attention.primary_signal === "runtime_status") return "коротко объяснить причину задержки и предложить Context Manager/Attention без fast-перехватов";
   if (attention.primary_signal === "criticism_or_quality_check") return "признать проблему, назвать причину и следующий слой";
+  if (attention.primary_signal === "agenda") return "показать задачи или предложить одну конкретную задачу с действием";
   if (attention.primary_signal === "development") return "принять направление и назвать конкретный следующий слой мозга";
   if (attention.primary_signal === "identity") return "ответить кто я, без ухода в прошлый контекст";
   if (attention.primary_signal === "memory") return "показать только важную память";
@@ -724,6 +859,14 @@ function buildInnerDirector(state, userText = "") {
     responseStyle = "goal_short";
     nextStep = "назвать главную цель и ближайший слой";
     reason = "Сергей спрашивает про цель агента.";
+  } else if (a.primary_signal === "agenda") {
+    intent = "agenda_check";
+    decision = "answer_agenda_with_next_action";
+    priority = "turn_goal_into_work_plan";
+    responseStyle = "agenda_short";
+    shouldRemember = true;
+    nextStep = "показать задачи или предложить создать одну конкретную задачу по текущей повестке";
+    reason = "Сергей спрашивает не абстрактное развитие, а рабочую повестку и с чего начать.";
   } else if (a.is_runtime_status_question) {
     intent = "runtime_quality";
     decision = "explain_cause_then_next_step";
@@ -871,6 +1014,7 @@ function buildMessages(state, userText, msg) {
     user_message: userText,
     attention: buildAttentionModel(state, userText),
     situation_model: buildSituationModel(state, userText),
+    agenda: buildAgendaModel(state, userText),
     director: buildInnerDirector(state, userText),
     mistake_learning: buildMistakeLearningModel(state, userText),
     semantic_hint: buildSemanticHint(state, userText),
@@ -926,21 +1070,24 @@ function buildMessages(state, userText, msg) {
   };
 
   const system = [
-    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.4.1: User-First Director / Goal Balance.",
+    "Ты — единый внутренний мозг SKYNET / Лондон для Сергея, версия v7.4.2: Task Context / Agenda Memory.",
     "Это не командный бот и не быстрый локальный перехватчик. Каждый обычный текст решай как один цельный агент: понять смысл, вспомнить нужное, выбрать действие, ответить коротко.",
     "Перед тобой есть attention, situation_model и director. Attention показывает главный сигнал, situation_model описывает сцену, director выбирает режим поведения: ответить, запомнить, спросить, предложить, действовать или остановить действие.",
     "Director — не шаблон ответа. Это внутренний управляющий слой. Следуй его intent/decision/priority, но формулируй живой короткий ответ сама.",
-    "v7.4 добавила обучение на ошибках. v7.4.1 добавляет баланс цели: главная цель развития всегда в фоне, но не навязывай её в обычном чате.",
+    "v7.4 добавила обучение на ошибках. v7.4.1 добавила баланс цели. v7.4.2 добавляет рабочую повестку: задачи, текущий слой, следующий шаг и критерий проверки.",
     "Mistake Learning — не логирование каждого сообщения. Записывай только реальные уроки: что пошло не так, причина, новое правило поведения.",
     "Когда есть ошибка, хорошая наружная форма: 'Да. Ошибка понятна: ... Запомнила: ...' — коротко, без технодампа.",
     "Тебе уже дали компактный контекст. Не пытайся восстановить всю историю; используй только релевантное из attention, situation_model, state, working, recent_turns, pending и recent_experience.",
     "Приоритеты понимания: 1) текущая фраза Сергея, 2) director.intent/decision/priority, 3) attention.primary_signal, 4) situation_model, 5) последняя реплика агента и open_loop, 6) рабочая память, 7) долгосрочная память. Не продолжай прошлую мысль, если текущая фраза имеет самостоятельный смысл.",
     "User-first правило: сначала отвечай на то, что Сергей сказал сейчас. Цель стать Джарвисом — фон, а не повод каждый раз говорить о саморазвитии.",
+    "Agenda правило: если Сергей спрашивает 'что у нас по задачам', 'что дальше', 'с чего начнём', 'предлагай как' — отвечай через agenda: активные задачи, текущая повестка, один следующий конкретный шаг.",
+    "Если активных задач нет, не говори 'давай обсудим механизм обратной связи'. Скажи: активных задач нет; текущая повестка такая-то; предлагаю создать задачу; делаем?",
+    "Если Сергей говорит 'так предлагай, как' — не обсуждай абстрактно. Дай план из 2–3 шагов и предложи создать задачу через pending.set.",
     "Если Сергей просто здоровается — ответь коротко: 'Я на месте, Серёга.' Не начинай обсуждать развитие, ошибки, обратную связь или следующий слой.",
     "Саморазвитие поднимай только когда Сергей явно говорит про развитие, Джарвиса, мозг, ошибки, план или следующий слой.",
     "Не спрашивай 'как ты видишь следующий шаг' и не говори 'делись идеями', если можешь сама назвать следующий шаг. Держи инициативу.",
     "Не говори 'я хочу развивать SKYNET' в сервисном стиле. Говори от роли: моя цель — стать полезнее Сергею; следующий шаг — ...",
-    "Если director.decision указывает answer_presence, answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
+    "Если director.decision указывает answer_presence, answer_identity, summarize_relevant_memory, answer_goal, plan_next_brain_layer, answer_agenda_with_next_action, continue_last_thought, explain_cause_then_next_step или admit_and_correct_mechanism — отвечай именно в этом режиме, а не по инерции прошлого ответа.",
     "Если director.should_remember=true, добавь короткий experience.write или memory.write только если есть реальный урок. Не логируй всё подряд.",
     "Если director.should_ask=true, задай один короткий вопрос. Если информации хватает — не спрашивай.",
     "Если director.should_block=true, остановись коротко. Но разговор о развитии/Джарвисе не блокируй.",
@@ -1122,6 +1269,7 @@ async function applyDecision(state, decision, msg) {
   if (!speech) speech = "Поняла.";
   speech = cleanVoice(speech, decision.technical_mode, state);
   speech = userFirstVoiceGuard(speech, decision, msg, state);
+  ensureAgendaPending(state, decision, msg, speech);
 
   if (events.some((e) => e.type === "blocked_dangerous") && !decision.technical_mode) {
     if (isDevelopmentContext(state, msg?.text || "")) {
@@ -1134,6 +1282,21 @@ async function applyDecision(state, decision, msg) {
     }
   }
   return { speech, events };
+}
+
+function ensureAgendaPending(state, decision, msg, speech) {
+  if (decision?.technical_mode) return;
+  const a = buildAttentionModel(state, msg?.text || "");
+  if (a.primary_signal !== "agenda") return;
+  if (state.pending || activeTasks(state).length > 0) return;
+  const ag = normalizeAgenda(state.agenda, state);
+  state.pending = {
+    id: id("pending"),
+    label: ag.next_task_title,
+    action: { op: "task.add", title: ag.next_task_title, details: ag.next_task_details },
+    created_at: now(),
+    expires_at: new Date(Date.now() + PENDING_TTL_MS).toISOString()
+  };
 }
 
 function sanitizeOp(raw) {
@@ -1337,7 +1500,11 @@ function userFirstVoiceGuard(text, decision, msg, state) {
   if (!decision?.technical_mode && attention.primary_signal === "greeting") {
     return "Я на месте, Серёга.";
   }
-  if (!decision?.technical_mode && !attention.is_development_conversation && isSelfDevelopmentOverreach(s)) {
+  if (!decision?.technical_mode && attention.primary_signal === "agenda") {
+    const genericAgenda = lower(s).includes("механизм обратной связи") || lower(s).includes("давай обсудим") || lower(s).includes("важный шаг для моего саморазвития") || lower(s).includes("более полезным помощником");
+    if (genericAgenda || isGenericBotSpeech(s)) return agendaFallbackSpeech(state, msg?.text || "");
+  }
+  if (!decision?.technical_mode && !attention.is_development_conversation && !attention.is_agenda_request && isSelfDevelopmentOverreach(s)) {
     if (attention.primary_signal === "identity") return "Я Скайнет / Лондон. Твой цифровой помощник. Моя цель — стать помощником уровня Джарвиса.";
     if (attention.primary_signal === "memory") return s;
     if (attention.primary_signal === "criticism_or_quality_check") return s;
@@ -1423,6 +1590,22 @@ function updateWorking(state, decision, msg, speech) {
     recent_turns: recent,
     updated_at: now()
   };
+  state.agenda = updateAgendaFromTurn(state, msg.text, speech);
+}
+
+function updateAgendaFromTurn(state, userText, speech) {
+  const prev = normalizeAgenda(state.agenda, state);
+  const a = buildAttentionModel(state, userText);
+  if (a.primary_signal === "agenda" || a.primary_signal === "development") {
+    return normalizeAgenda({
+      ...prev,
+      current_layer: "v7.4.2 Task Context / Agenda Memory",
+      current_problem: "нужно превратить цель стать Джарвисом в конкретные задачи и следующий шаг",
+      next_task_title: prev.next_task_title || "Task Context / Agenda Memory",
+      updated_at: now()
+    }, state);
+  }
+  return prev;
 }
 
 
@@ -1586,9 +1769,25 @@ function mistakesBrief(state) {
   return xs.map((m, i) => `${i + 1}. ${m.text}`).join("\n");
 }
 
+function agendaBrief(state) {
+  const a = buildAgendaModel(state, "что у нас по задачам");
+  const lines = [];
+  lines.push(`Слой: ${a.current_layer}`);
+  lines.push(`Проблема: ${a.current_problem}`);
+  lines.push(`Следующая задача: ${a.next_task_title}`);
+  lines.push(`Готово, когда: ${a.done_definition}`);
+  if (a.active_tasks_count) {
+    lines.push("Активные задачи:");
+    for (const [i, t] of a.active_tasks.entries()) lines.push(`${i + 1}. ${t.title}`);
+  } else {
+    lines.push("Активных задач нет.");
+  }
+  return lines.join("\n");
+}
+
 function taskListText(state) {
   const active = activeTasks(state);
-  if (!active.length) return "Активных задач нет.";
+  if (!active.length) return agendaFallbackSpeech(state, "что у нас по задачам");
   return active.map((t, i) => `${i + 1}. ${t.title}`).join("\n");
 }
 
@@ -1601,7 +1800,7 @@ async function handleCommand(env, c, msg) {
     return [
       "Я на месте, Серёга.",
       "Пиши обычным текстом.",
-      "Команды: /status, /memory, /working, /attention, /situation, /director, /experience, /mistakes, /tasks, /pending, /selftest."
+      "Команды: /status, /memory, /working, /attention, /situation, /director, /agenda, /experience, /mistakes, /tasks, /pending, /selftest."
     ].join("\n");
   }
 
@@ -1615,6 +1814,7 @@ async function handleCommand(env, c, msg) {
       `Память: ${hasKV(env) ? "есть" : "нет KV"}`,
       `Цель: ${state.identity.main_goal}`,
       `Фокус: ${state.working.focus || "нет"}`,
+      `Повестка: ${state.agenda?.next_task_title || "нет"}`,
       `Внимание: ${state.working.attention?.primary_signal || "нет"}`,
       `Директор: ${state.working.director?.decision || "нет"}`,
       `Ситуация: ${state.working.situation_model?.scene || state.working.situation || "нет"}`,
@@ -1630,6 +1830,7 @@ async function handleCommand(env, c, msg) {
   if (cmd === "/attention") return attentionBrief(state);
   if (cmd === "/situation") return situationBrief(state);
   if (cmd === "/director") return directorBrief(state);
+  if (cmd === "/agenda") return agendaBrief(state);
   if (cmd === "/experience") return experienceBrief(state);
   if (cmd === "/mistakes") return mistakesBrief(state);
   if (cmd === "/tasks") return taskListText(state);
@@ -1693,6 +1894,7 @@ function selfTestText(env, c, state) {
     ["situation model", "active"],
     ["inner director", "active"],
     ["mistake learning", "active"],
+    ["agenda memory", "active"],
     ["fast mind", "disabled for ordinary text"]
   ];
   return checks.map(([k, v]) => `${k}: ${v}`).join("\n");
@@ -1707,13 +1909,15 @@ function httpHealth(env) {
     health: "/health",
     brain_key: BRAIN_KEY,
     kv_binding: "MINISKYNET_KV",
-    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory; attention/situation/director/mistake-learning guide behavior",
+    ordinary_text_flow: "one LLM brain for every ordinary text; context manager selects compact memory; attention/situation/director/agenda/mistake-learning guide behavior",
     fast_mind: false,
     context_manager: true,
     attention_model: true,
     situation_model: true,
     inner_director: true,
     mistake_learning: true,
+    agenda_memory: true,
+    task_context: true,
     dialogue_continuity: true,
     development_mode: true,
     working_memory: true,
